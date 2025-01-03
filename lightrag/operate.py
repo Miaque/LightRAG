@@ -1,26 +1,40 @@
 import asyncio
 import json
 import re
-from tqdm.asyncio import tqdm as tqdm_async
-from typing import Union
-from collections import Counter, defaultdict
 import warnings
-from .utils import (
-    logger,
+from collections import Counter, defaultdict
+from typing import Union
+
+from tqdm.asyncio import tqdm as tqdm_async
+
+from lightrag.base import (
+    BaseGraphStorage,
+    BaseKVStorage,
+    BaseVectorStorage,
+    QueryParam,
+    TextChunkSchema,
+)
+from lightrag.cleaner.clean_processor import CleanProcessor
+from lightrag.prompt import GRAPH_FIELD_SEP, PROMPTS
+from lightrag.splitter.document import Document
+from lightrag.splitter.fixed_text_splitter import EnhanceRecursiveCharacterTextSplitter
+from lightrag.tokenizers.gpt2_tokenzier import GPT2Tokenizer
+from lightrag.utils import (
+    CacheData,
     clean_str,
+    compute_args_hash,
     compute_mdhash_id,
     decode_tokens_by_tiktoken,
     encode_string_by_tiktoken,
+    handle_cache,
     is_float_regex,
     list_of_list_to_csv,
+    logger,
     pack_user_ass_to_openai_messages,
+    process_combine_contexts,
+    save_to_cache,
     split_string_by_multi_markers,
     truncate_list_by_token_size,
-    process_combine_contexts,
-    compute_args_hash,
-    handle_cache,
-    save_to_cache,
-    CacheData,
 )
 from .base import (
     BaseGraphStorage,
@@ -51,6 +65,49 @@ def chunking_by_token_size(
                 "chunk_order_index": index,
             }
         )
+    return results
+
+
+def chunking_by_chinese_character(
+    content: str, overlap_token_size=50, max_token_size=500, tiktoken_model="gpt-4o"
+):
+    results = []
+    splitter = EnhanceRecursiveCharacterTextSplitter.from_encoder(
+        chunk_size=max_token_size,
+        chunk_overlap=overlap_token_size,
+        separators=["\n\n", "。", ". ", " ", ""],
+    )
+    doc = Document(
+        page_content=content,
+    )
+    document_text = CleanProcessor.clean(
+        doc.page_content,
+        {
+            "rules": {
+                "pre_processing_rules": [{"id": "remove_extra_spaces", "enabled": True}]
+            }
+        },
+    )
+    doc.page_content = document_text
+
+    document_nodes = splitter.split_documents([doc])
+    for index, document_node in enumerate(document_nodes):
+        item = {}
+
+        if document_node.page_content.strip():
+            page_content = document_node.page_content
+
+            item["tokens"] = GPT2Tokenizer.get_num_tokens(page_content)
+            item["chunk_order_index"] = index
+            # delete Splitter character
+            if page_content.startswith(".") or page_content.startswith("。"):
+                page_content = page_content[1:].strip()
+            else:
+                page_content = page_content
+
+            if len(page_content) > 0:
+                item["content"] = page_content
+                results.append(item)
     return results
 
 

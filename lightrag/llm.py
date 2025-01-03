@@ -4,16 +4,19 @@ import json
 import os
 import re
 import struct
+import sys
 from functools import lru_cache
-from typing import List, Dict, Callable, Any, Union, Optional
+from typing import Any, Callable, Dict, List, Optional, Union
+
 import aioboto3
 import aiohttp
 import numpy as np
 import ollama
 import torch
 from openai import (
-    AsyncOpenAI,
     APIConnectionError,
+    AsyncAzureOpenAI,
+    AsyncOpenAI,
     RateLimitError,
     APITimeoutError,
     AsyncAzureOpenAI,
@@ -21,20 +24,18 @@ from openai import (
 from pydantic import BaseModel, Field
 from tenacity import (
     retry,
+    retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
-    retry_if_exception_type,
 )
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from .utils import (
-    wrap_embedding_func_with_attrs,
+from lightrag.utils import (
     locate_json_string_body_from_string,
-    safe_unicode_decode,
     logger,
+    safe_unicode_decode,
+    wrap_embedding_func_with_attrs,
 )
-
-import sys
 
 if sys.version_info < (3, 9):
     from typing import AsyncIterator
@@ -62,6 +63,67 @@ async def openai_complete_if_cache(
 ) -> str:
     if api_key:
         os.environ["OPENAI_API_KEY"] = api_key
+
+    openai_async_client = (
+        AsyncOpenAI() if base_url is None else AsyncOpenAI(base_url=base_url)
+    )
+    kwargs.pop("hashing_kv", None)
+    kwargs.pop("keyword_extraction", None)
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.extend(history_messages)
+    messages.append({"role": "user", "content": prompt})
+
+    # 添加日志输出
+    logger.debug("===== Query Input to LLM =====")
+    logger.debug(f"Query: {prompt}")
+    logger.debug(f"System prompt: {system_prompt}")
+    logger.debug("Full context:")
+    if "response_format" in kwargs:
+        response = await openai_async_client.beta.chat.completions.parse(
+            model=model, messages=messages, **kwargs
+        )
+    else:
+        response = await openai_async_client.chat.completions.create(
+            model=model, messages=messages, **kwargs
+        )
+
+    if hasattr(response, "__aiter__"):
+
+        async def inner():
+            async for chunk in response:
+                content = chunk.choices[0].delta.content
+                if content is None:
+                    continue
+                if r"\u" in content:
+                    content = safe_unicode_decode(content.encode("utf-8"))
+                yield content
+
+        return inner()
+    else:
+        content = response.choices[0].message.content
+        if r"\u" in content:
+            content = safe_unicode_decode(content.encode("utf-8"))
+        return content
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=4, max=10),
+    retry=retry_if_exception_type((RateLimitError, APIConnectionError, APITimeoutError)),
+)
+async def oneapi_complete_if_cache(
+    model,
+    prompt,
+    system_prompt=None,
+    history_messages=[],
+    base_url=None,
+    api_key=None,
+    **kwargs,
+) -> str:
+    if api_key:
+        os.environ["ONEAPI_API_KEY"] = api_key
 
     openai_async_client = (
         AsyncOpenAI() if base_url is None else AsyncOpenAI(base_url=base_url)
@@ -434,7 +496,7 @@ def initialize_lmdeploy_pipeline(
     model_format="hf",
     quant_policy=0,
 ):
-    from lmdeploy import pipeline, ChatTemplateConfig, TurbomindEngineConfig
+    from lmdeploy import ChatTemplateConfig, TurbomindEngineConfig, pipeline
 
     lmdeploy_pipe = pipeline(
         model_path=model,
@@ -496,7 +558,7 @@ async def lmdeploy_model_if_cache(
     """
     try:
         import lmdeploy
-        from lmdeploy import version_info, GenerationConfig
+        from lmdeploy import GenerationConfig, version_info
     except Exception:
         raise ImportError("Please install lmdeploy before initialize lmdeploy backend.")
     kwargs.pop("hashing_kv", None)
@@ -891,6 +953,30 @@ async def zhipu_embedding(
 async def openai_embedding(
     texts: list[str],
     model: str = "text-embedding-3-small",
+    base_url: str = None,
+    api_key: str = None,
+) -> np.ndarray:
+    if api_key:
+        os.environ["OPENAI_API_KEY"] = api_key
+
+    openai_async_client = (
+        AsyncOpenAI() if base_url is None else AsyncOpenAI(base_url=base_url)
+    )
+    response = await openai_async_client.embeddings.create(
+        model=model, input=texts, encoding_format="float"
+    )
+    return np.array([dp.embedding for dp in response.data])
+
+
+@wrap_embedding_func_with_attrs(embedding_dim=1024, max_token_size=8192)
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=4, max=60),
+    retry=retry_if_exception_type((RateLimitError, APIConnectionError, APITimeoutError)),
+)
+async def oneapi_embedding(
+    texts: list[str],
+    model: str = "BAAI/bge-m3",
     base_url: str = None,
     api_key: str = None,
 ) -> np.ndarray:

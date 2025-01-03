@@ -33,6 +33,7 @@ class Neo4JStorage(BaseGraphStorage):
             global_config=global_config,
             embedding_func=embedding_func,
         )
+        self._db_name = "lightrag"
         self._driver = None
         self._driver_lock = asyncio.Lock()
         URI = os.environ["NEO4J_URI"]
@@ -63,7 +64,7 @@ class Neo4JStorage(BaseGraphStorage):
     async def has_node(self, node_id: str) -> bool:
         entity_name_label = node_id.strip('"')
 
-        async with self._driver.session() as session:
+        async with self._driver.session(database=self._db_name) as session:
             query = (
                 f"MATCH (n:`{entity_name_label}`) RETURN count(n) > 0 AS node_exists"
             )
@@ -78,7 +79,7 @@ class Neo4JStorage(BaseGraphStorage):
         entity_name_label_source = source_node_id.strip('"')
         entity_name_label_target = target_node_id.strip('"')
 
-        async with self._driver.session() as session:
+        async with self._driver.session(database=self._db_name) as session:
             query = (
                 f"MATCH (a:`{entity_name_label_source}`)-[r]-(b:`{entity_name_label_target}`) "
                 "RETURN COUNT(r) > 0 AS edgeExists"
@@ -91,7 +92,7 @@ class Neo4JStorage(BaseGraphStorage):
             return single_result["edgeExists"]
 
     async def get_node(self, node_id: str) -> Union[dict, None]:
-        async with self._driver.session() as session:
+        async with self._driver.session(database=self._db_name) as session:
             entity_name_label = node_id.strip('"')
             query = f"MATCH (n:`{entity_name_label}`) RETURN n"
             result = await session.run(query)
@@ -108,7 +109,7 @@ class Neo4JStorage(BaseGraphStorage):
     async def node_degree(self, node_id: str) -> int:
         entity_name_label = node_id.strip('"')
 
-        async with self._driver.session() as session:
+        async with self._driver.session(database=self._db_name) as session:
             query = f"""
                 MATCH (n:`{entity_name_label}`)
                 RETURN COUNT{{ (n)--() }} AS totalEdgeCount
@@ -155,7 +156,7 @@ class Neo4JStorage(BaseGraphStorage):
         Returns:
             list: List of all relationships/edges found
         """
-        async with self._driver.session() as session:
+        async with self._driver.session(database=self._db_name) as session:
             query = f"""
             MATCH (start:`{entity_name_label_source}`)-[r]->(end:`{entity_name_label_target}`)
             RETURN properties(r) as edge_properties
@@ -186,7 +187,7 @@ class Neo4JStorage(BaseGraphStorage):
         query = f"""MATCH (n:`{node_label}`)
                 OPTIONAL MATCH (n)-[r]-(connected)
                 RETURN n, r, connected"""
-        async with self._driver.session() as session:
+        async with self._driver.session(database=self._db_name) as session:
             results = await session.run(query)
             edges = []
             async for record in results:
@@ -241,7 +242,7 @@ class Neo4JStorage(BaseGraphStorage):
             )
 
         try:
-            async with self._driver.session() as session:
+            async with self._driver.session(database=self._db_name) as session:
                 await session.execute_write(_do_upsert)
         except Exception as e:
             logger.error(f"Error during upsert: {str(e)}")
@@ -288,7 +289,7 @@ class Neo4JStorage(BaseGraphStorage):
             )
 
         try:
-            async with self._driver.session() as session:
+            async with self._driver.session(database=self._db_name) as session:
                 await session.execute_write(_do_upsert_edge)
         except Exception as e:
             logger.error(f"Error during edge upsert: {str(e)}")

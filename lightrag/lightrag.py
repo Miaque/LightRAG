@@ -17,6 +17,7 @@ from .operate import (
     kg_query,
     naive_query,
     mix_kg_vector_query,
+    chunking_by_chinese_character,
 )
 
 from .utils import (
@@ -367,7 +368,7 @@ class LightRAG:
                             **dp,
                             "full_doc_id": doc_id,
                         }
-                        for dp in chunking_by_token_size(
+                        for dp in chunking_by_chinese_character(
                             doc["content"],
                             overlap_token_size=self.chunk_overlap_token_size,
                             max_token_size=self.chunk_token_size,
