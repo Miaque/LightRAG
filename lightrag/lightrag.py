@@ -120,6 +120,7 @@ class LightRAG:
     working_dir: str = field(
         default_factory=lambda: f"./lightrag_cache_{datetime.now().strftime('%Y-%m-%d-%H:%M:%S')}"
     )
+    case_code: str = field(default="default")
     # Default not to use embedding cache
     embedding_cache_config: dict = field(
         default_factory=lambda: {

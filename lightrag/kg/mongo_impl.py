@@ -21,8 +21,9 @@ class MongoKVStorage(BaseKVStorage):
             os.environ.get("MONGO_URI", "mongodb://root:root@localhost:27017/")
         )
         database = client.get_database(os.environ.get("MONGO_DATABASE", "LightRAG"))
-        self._data = database.get_collection(self.namespace)
-        logger.info(f"Use MongoDB as KV {self.namespace}")
+        collection_name = self.global_config["case_code"] + "_" + self.namespace
+        self._data = database.get_collection(collection_name)
+        logger.info(f"Use MongoDB as KV {collection_name}")
 
     async def all_keys(self) -> list[str]:
         return [x["_id"] for x in self._data.find({}, {"_id": 1})]
@@ -65,29 +66,37 @@ class MongoDocStatusStorage(DocStatusStorage):
         )
         database = client.get_database(os.environ.get("MONGO_DATABASE", "LightRAG"))
         self._col = database.get_collection(self.namespace)
+        self.case_code = self.global_config["case_code"]
 
     async def filter_keys(self, data: list[str]) -> set[str]:
-        # 根据给定data，查询"_id": {"$in": data} 并且 "status": {"$ne": "processed"}
-        query = {"_id": {"$in": data}, "status": {"$ne": DocStatus.PROCESSED}}
+        # 根据给定data，查询"_id": {"$in": data} 并且 "status": {"$ne": "processed"}, case_code
+        query = {
+            "_id": {"$in": data},
+            "status": {"$ne": DocStatus.PROCESSED},
+            "case_code": self.case_code,
+        }
         exist_ids = set([x["_id"] for x in self._col.find(query, {"_id": 1})])
         # exist_ids 和 data 计算差集
         return set(data).difference(exist_ids)
 
     async def get_status_counts(self) -> Dict[str, int]:
-        # 根据status分组，统计每个status的文档数量
+        # 根据status分组，统计每个status的文档数量，并加上case_code条件
         counts = self._col.aggregate(
-            [{"$group": {"_id": "$status", "count": {"$sum": 1}}}]
+            [
+                {"$match": {"case_code": self.case_code}},
+                {"$group": {"_id": "$status", "count": {"$sum": 1}}},
+            ]
         )
         return {result["_id"]: result["count"] for result in counts}
 
     async def get_failed_docs(self) -> Dict[str, DocProcessingStatus]:
         """Get all failed documents"""
-        query = {"status": DocStatus.FAILED}
+        query = {"status": DocStatus.FAILED, "case_code": self.case_code}
         return {doc["_id"]: doc for doc in self._col.find(query)}
 
     async def get_pending_docs(self) -> Dict[str, DocProcessingStatus]:
         """Get all pending documents"""
-        query = {"status": DocStatus.PENDING}
+        query = {"status": DocStatus.PENDING, "case_code": self.case_code}
         return {doc["_id"]: doc for doc in self._col.find(query)}
 
     async def index_done_callback(self):
@@ -102,13 +111,14 @@ class MongoDocStatusStorage(DocStatusStorage):
         """
         for k, v in data.items():
             v["_id"] = k
+            v["case_code"] = self.case_code
             self._col.update_one({"_id": k}, {"$set": v}, upsert=True)
         return data
 
     async def get(self, doc_id: str) -> Union[DocProcessingStatus, None]:
         """Get document status by ID"""
-        return self._col.find_one({"_id": doc_id})
+        return self._col.find_one({"_id": doc_id, "case_code": self.case_code})
 
     async def delete(self, doc_ids: list[str]):
         """Delete document status by IDs"""
-        self._col.delete_many({"_id", {"$in", doc_ids}})
+        self._col.delete_many({"_id": {"$in": doc_ids}, "case_code": self.case_code})

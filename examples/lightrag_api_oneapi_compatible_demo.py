@@ -1,10 +1,12 @@
 import asyncio
+import logging
 import os
+import time
 from typing import Optional
 
 import nest_asyncio
 import numpy as np
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from lightrag import LightRAG, QueryParam
@@ -13,6 +15,8 @@ from lightrag.llm import (
     oneapi_embedding,
 )
 from lightrag.utils import EmbeddingFunc
+
+logger = logging.getLogger(__name__)
 
 # Apply nest_asyncio to solve event loop issues
 nest_asyncio.apply()
@@ -83,34 +87,39 @@ async def get_embedding_dim():
 
 
 # Initialize RAG instance
-rag = LightRAG(
-    working_dir=WORKING_DIR,
-    llm_model_func=llm_model_func,
-    llm_model_max_async=4,
-    llm_model_max_token_size=32768,
-    embedding_func=EmbeddingFunc(
-        embedding_dim=asyncio.run(get_embedding_dim()),
-        max_token_size=EMBEDDING_MAX_TOKEN_SIZE,
-        func=embedding_func,
-    ),
-    embedding_batch_num = 32,
-    embedding_func_max_async = 16,
-    kv_storage="MongoKVStorage",
-    graph_storage="Neo4JStorage",
-    vector_storage="MilvusVectorDBStorge",
-)
+def get_rag(case_code: str = "default") -> LightRAG:
+    rag = LightRAG(
+        working_dir=WORKING_DIR,
+        case_code=case_code,
+        llm_model_func=llm_model_func,
+        llm_model_max_async=4,
+        llm_model_max_token_size=32768,
+        embedding_func=EmbeddingFunc(
+            embedding_dim=asyncio.run(get_embedding_dim()),
+            max_token_size=EMBEDDING_MAX_TOKEN_SIZE,
+            func=embedding_func,
+        ),
+        embedding_batch_num=32,
+        embedding_func_max_async=16,
+        kv_storage="MongoKVStorage",
+        graph_storage="Neo4JStorage",
+        vector_storage="MilvusVectorDBStorge",
+    )
+    return rag
 
 
 # Data models
 
 
 class QueryRequest(BaseModel):
+    case_code: str
     query: str
     mode: str = "hybrid"
     only_need_context: bool = False
 
 
 class InsertRequest(BaseModel):
+    case_code: str
     text: str
 
 
@@ -126,14 +135,14 @@ class Response(BaseModel):
 @app.post("/query", response_model=Response)
 async def query_endpoint(request: QueryRequest):
     try:
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
-            None,
-            lambda: rag.query(
-                request.query,
-                param=QueryParam(
-                    mode=request.mode, only_need_context=request.only_need_context
-                ),
+        start_time = time.perf_counter()
+        rag = get_rag(case_code=request.case_code)
+        end_time = time.perf_counter()
+        logger.info(f"耗时 {end_time - start_time} ms")
+        result = await rag.aquery(
+            request.query,
+            param=QueryParam(
+                mode=request.mode, only_need_context=request.only_need_context
             ),
         )
         return Response(status="success", data=result)
@@ -145,14 +154,16 @@ async def query_endpoint(request: QueryRequest):
 async def insert_endpoint(request: InsertRequest):
     try:
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, lambda: rag.insert(request.text))
+        await loop.run_in_executor(
+            None, lambda: get_rag(case_code=request.case_code).insert(request.text)
+        )
         return Response(status="success", message="Text inserted successfully")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/insert_file", response_model=Response)
-async def insert_file(file: UploadFile = File(...)):
+async def insert_file(case_code: str = Form(), file: UploadFile = File(...)):
     try:
         file_content = await file.read()
         # Read file content
@@ -163,7 +174,9 @@ async def insert_file(file: UploadFile = File(...)):
             content = file_content.decode("gbk")
         # Insert file content
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, lambda: rag.insert(content))
+        await loop.run_in_executor(
+            None, lambda: get_rag(case_code=case_code).insert(content)
+        )
 
         return Response(
             status="success",

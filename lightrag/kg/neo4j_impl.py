@@ -1,28 +1,55 @@
 import asyncio
+import inspect
 import os
 from dataclasses import dataclass
-from typing import Any, Union, Tuple, List, Dict
-import inspect
-from lightrag.utils import logger
-from ..base import BaseGraphStorage
+from typing import Any, Dict, List, Tuple, Union
+
 from neo4j import (
-    AsyncGraphDatabase,
-    exceptions as neo4jExceptions,
     AsyncDriver,
+    AsyncGraphDatabase,
     AsyncManagedTransaction,
+    GraphDatabase,
 )
-
-
+from neo4j import (
+    exceptions as neo4jExceptions,
+)
 from tenacity import (
     retry,
+    retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
-    retry_if_exception_type,
 )
+
+from lightrag.utils import logger
+
+from ..base import BaseGraphStorage
 
 
 @dataclass
 class Neo4JStorage(BaseGraphStorage):
+    @staticmethod
+    def create_graph_db_if_not_exist(db_name: str):
+        # 使用同步驱动创建连接
+        URI = os.environ["NEO4J_URI"]
+        USERNAME = os.environ["NEO4J_USERNAME"]
+        PASSWORD = os.environ["NEO4J_PASSWORD"]
+        driver = GraphDatabase.driver(URI, auth=(USERNAME, PASSWORD))
+
+        try:
+            with driver.session(database="system") as session:
+                # 检查数据库是否存在
+                result = session.run("SHOW DATABASES")
+                databases = [record["name"] for record in result]
+
+                # 如果数据库不存在，则创建
+                if db_name not in databases:
+                    session.run(f"CREATE DATABASE {db_name} IF NOT EXISTS")
+                    logger.info(f"Created new database: {db_name}")
+                else:
+                    logger.debug(f"Database {db_name} already exists")
+        finally:
+            driver.close()
+
     @staticmethod
     def load_nx_graph(file_name):
         print("no preloading of graph with neo4j in production")
@@ -33,7 +60,7 @@ class Neo4JStorage(BaseGraphStorage):
             global_config=global_config,
             embedding_func=embedding_func,
         )
-        self._db_name = "lightrag"
+        self._db_name = global_config["case_code"]
         self._driver = None
         self._driver_lock = asyncio.Lock()
         URI = os.environ["NEO4J_URI"]
@@ -42,6 +69,9 @@ class Neo4JStorage(BaseGraphStorage):
         self._driver: AsyncDriver = AsyncGraphDatabase.driver(
             URI, auth=(USERNAME, PASSWORD)
         )
+
+        # 直接调用同步方法
+        Neo4JStorage.create_graph_db_if_not_exist(self._db_name)
         return None
 
     def __post_init__(self):
