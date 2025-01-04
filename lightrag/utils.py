@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime
 import html
 import io
 import csv
@@ -13,6 +14,7 @@ from typing import Any, Union, List, Optional
 import xml.etree.ElementTree as ET
 
 import numpy as np
+import pytz
 import tiktoken
 
 from lightrag.prompt import PROMPTS
@@ -34,18 +36,27 @@ logger = logging.getLogger("lightrag")
 
 
 def set_logger(log_file: str):
-    logger.setLevel(logging.DEBUG)
+    logger.setLevel(logging.INFO)
 
     file_handler = logging.FileHandler(log_file)
-    file_handler.setLevel(logging.DEBUG)
+    file_handler.setLevel(logging.INFO)
 
     formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        "%(asctime)s.%(msecs)03d %(levelname)s [%(threadName)s] [%(filename)s:%(lineno)d] - %(message)s"
     )
     file_handler.setFormatter(formatter)
 
     if not logger.handlers:
         logger.addHandler(file_handler)
+
+    timezone = pytz.timezone("Asia/Shanghai")
+    
+    def time_converter(seconds):
+        return datetime.fromtimestamp(seconds, tz=timezone).timetuple()
+
+    for handler in logging.root.handlers:
+        if handler.formatter:
+            handler.formatter.converter = time_converter
 
 
 @dataclass
