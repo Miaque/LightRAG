@@ -1,0 +1,102 @@
+services:
+  # The postgres database.
+  db:
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-abc123456}
+      POSTGRES_DB: ${POSTGRES_DB:-oneapi}
+      PGDATA: ${PGDATA:-/var/lib/postgresql/data/pgdata}
+    command: >
+      postgres -c 'max_connections=${POSTGRES_MAX_CONNECTIONS:-100}'
+               -c 'shared_buffers=${POSTGRES_SHARED_BUFFERS:-128MB}'
+               -c 'work_mem=${POSTGRES_WORK_MEM:-4MB}'
+               -c 'maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-64MB}'
+               -c 'effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-4096MB}'
+    volumes:
+      - ${PGDATA_HOST_VOLUME:-./volumes/db/data}:/var/lib/postgresql/data
+    ports:
+      - "${EXPOSE_POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
+  # The redis cache.
+  redis:
+    image: redis:6-alpine
+    restart: always
+    volumes:
+      # Mount the redis data directory to the container.
+      - ${REDIS_HOST_VOLUME:-./volumes/redis/data}:/data
+    # Set the redis password when startup redis server.
+    ports:
+      - "${EXPOSE_REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+
+  one-api:
+    image: justsong/one-api:v0.6.10
+    container_name: one-api
+    restart: always
+    command: --log-dir /app/logs
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./volumes/one-api/data:/data
+      - ./volumes/one-api/logs:/app/logs
+    environment:
+      - SQL_DSN=postgres://postgres:abc123456@db:5432/oneapi # 修改此行，或注释掉以使用 SQLite 作为数据库
+      - REDIS_CONN_STRING=redis://redis
+      - SESSION_SECRET=random_string # 修改为随机字符串
+      - TZ=Asia/Shanghai
+    #      - NODE_TYPE=slave  # 多机部署时从节点取消注释该行
+    #      - SYNC_FREQUENCY=60  # 需要定期从数据库加载数据时取消注释该行
+    #      - FRONTEND_BASE_URL=https://openai.justsong.cn  # 多机部署时从节点取消注释该行
+    depends_on:
+      - redis
+      - db
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -q -O - http://localhost:3000/api/status | grep -o '\"success\":\\s*true' | awk -F: '{print $2}'",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  mongodb:
+    image: mongodb/mongodb-community-server:6.0.12-ubi8
+    container_name: mongodb
+    restart: always
+    security_opt:
+      - seccomp:unconfined
+    ports:
+      - "27017:27017"
+    volumes:
+      - ./volumes/mongodb/data:/data/db
+    environment:
+      - MONGODB_INITDB_ROOT_USERNAME=admin
+      - MONGODB_INITDB_ROOT_PASSWORD=abc123456
+
+  neo4j:
+    image: neo4j:5.26.0-enterprise
+    container_name: neo4j
+    restart: always
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - ./volumes/neo4j/logs:/logs
+      - ./volumes/neo4j/config:/config
+      - ./volumes/neo4j/data:/data
+      - ./volumes/neo4j/plugins:/plugins
+    environment:
+      - NEO4J_ACCEPT_LICENSE_AGREEMENT=yes
+      - NEO4J_AUTH=neo4j/abc123456
+      - NEO4J_apoc_export_file_enabled=true
+      - NEO4J_apoc_import_file_enabled=true
+      - NEO4J_apoc_import_file_use__neo4j__config=true
+      - NEO4J_PLUGINS=["apoc", "graph-data-science"]

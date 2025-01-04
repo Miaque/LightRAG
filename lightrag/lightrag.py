@@ -1,50 +1,50 @@
 import asyncio
 import os
-from tqdm.asyncio import tqdm as tqdm_async
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from functools import partial
-from typing import Type, cast, Dict
+from typing import Dict, Type, cast
 
+from tqdm.asyncio import tqdm as tqdm_async
+
+from lightrag.kg.mongo_impl import MongoDocStatusStorage
+
+from .base import (
+    BaseGraphStorage,
+    BaseKVStorage,
+    BaseVectorStorage,
+    DocStatus,
+    QueryParam,
+    StorageNameSpace,
+)
 from .llm import (
     gpt_4o_mini_complete,
     openai_embedding,
 )
 from .operate import (
+    chunking_by_chinese_character,
     chunking_by_token_size,
     extract_entities,
     # local_query,global_query,hybrid_query,
     kg_query,
-    naive_query,
     mix_kg_vector_query,
-    chunking_by_chinese_character,
+    naive_query,
 )
-
-from .utils import (
-    EmbeddingFunc,
-    compute_mdhash_id,
-    limit_async_func_call,
-    convert_response_to_json,
-    logger,
-    set_logger,
-)
-from .base import (
-    BaseGraphStorage,
-    BaseKVStorage,
-    BaseVectorStorage,
-    StorageNameSpace,
-    QueryParam,
-    DocStatus,
-)
-
+from .prompt import GRAPH_FIELD_SEP
 from .storage import (
+    JsonDocStatusStorage,
     JsonKVStorage,
     NanoVectorDBStorage,
     NetworkXStorage,
-    JsonDocStatusStorage,
 )
-
-from .prompt import GRAPH_FIELD_SEP
+from .utils import (
+    EmbeddingFunc,
+    compute_mdhash_id,
+    convert_response_to_json,
+    limit_async_func_call,
+    logger,
+    set_logger,
+)
 
 # future KG integrations
 
@@ -179,7 +179,7 @@ class LightRAG:
     convert_response_to_json_func: callable = convert_response_to_json
 
     # Add new field for document status storage type
-    doc_status_storage: str = field(default="JsonDocStatusStorage")
+    doc_status_storage: str = field(default="MongoDocStatusStorage")
 
     def __post_init__(self):
         log_file = os.path.join("lightrag.log")
@@ -302,6 +302,7 @@ class LightRAG:
             "GremlinStorage": GremlinStorage,
             # "ArangoDBStorage": ArangoDBStorage
             "JsonDocStatusStorage": JsonDocStatusStorage,
+            "MongoDocStatusStorage": MongoDocStatusStorage,
         }
 
     def insert(self, string_or_strings):
