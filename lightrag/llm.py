@@ -12,7 +12,6 @@ import aioboto3
 import aiohttp
 import numpy as np
 import ollama
-import torch
 from openai import (
     APIConnectionError,
     AsyncAzureOpenAI,
@@ -1210,6 +1209,7 @@ async def hf_embedding(texts: list[str], tokenizer, embed_model) -> np.ndarray:
     input_ids = tokenizer(
         texts, return_tensors="pt", padding=True, truncation=True
     ).input_ids.to(device)
+    import torch
     with torch.no_grad():
         outputs = embed_model(input_ids)
         embeddings = outputs.last_hidden_state.mean(dim=1)

@@ -12,7 +12,7 @@ nano-vectordb
 neo4j~=5.27.0
 networkx~=3.2.1
 
-numpy~=2.2.0
+numpy
 ollama~=0.4.4
 openai~=1.58.1
 oracledb
@@ -32,7 +32,7 @@ tenacity~=9.0.0
 
 # LLM packages
 tiktoken~=0.8.0
-torch~=2.5.1+cu121
+# torch~=2.5.1+cu121
 tqdm~=4.67.1
 transformers~=4.47.1
 xxhash
