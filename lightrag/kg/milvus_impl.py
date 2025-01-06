@@ -39,10 +39,10 @@ class MilvusVectorDBStorge(BaseVectorStorage):
             collection_name,
             dimension=self.embedding_func.embedding_dim,
         )
-        self.collection_name = collection_name
+        self._collection_name = collection_name
 
     async def upsert(self, data: dict[str, dict]):
-        logger.info(f"Inserting {len(data)} vectors to {self.collection_name}")
+        logger.info(f"Inserting {len(data)} vectors to {self._collection_name}")
         if not len(data):
             logger.warning("You insert an empty data to vector DB")
             return []
@@ -73,13 +73,13 @@ class MilvusVectorDBStorge(BaseVectorStorage):
         embeddings = np.concatenate(embeddings_list)
         for i, d in enumerate(list_data):
             d["vector"] = embeddings[i]
-        results = self._client.upsert(collection_name=self.collection_name, data=list_data)
+        results = self._client.upsert(collection_name=self._collection_name, data=list_data)
         return results
 
     async def query(self, query, top_k=5):
         embedding = await self.embedding_func([query])
         results = self._client.search(
-            collection_name=self.collection_name,
+            collection_name=self._collection_name,
             data=embedding,
             limit=top_k,
             output_fields=list(self.meta_fields),
