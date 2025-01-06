@@ -1,0 +1,11 @@
+{
+  "python.analysis.typeCheckingMode": "basic",
+  "terminal.integrated.env.windows": {
+    "PYTHONPATH": "${workspaceFolder}/lightrag"
+  },
+  "python.analysis.extraPaths": ["${workspaceFolder}/lightrag"],
+  "python.analysis.autoImportCompletions": true,
+  "python.analysis.indexing": true,
+  "python.analysis.packageIndexDepths": [["", 20, true]],
+  "debugpy.debugJustMyCode": true
+}
