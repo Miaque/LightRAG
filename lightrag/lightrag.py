@@ -7,9 +7,7 @@ from typing import Dict, Type, cast
 
 from tqdm.asyncio import tqdm as tqdm_async
 
-from lightrag.kg.mongo_impl import MongoDocStatusStorage
-
-from .base import (
+from lightrag.base import (
     BaseGraphStorage,
     BaseKVStorage,
     BaseVectorStorage,
@@ -17,11 +15,12 @@ from .base import (
     QueryParam,
     StorageNameSpace,
 )
-from .llm import (
+from lightrag.kg.mongo_impl import MongoDocStatusStorage
+from lightrag.llm import (
     gpt_4o_mini_complete,
     openai_embedding,
 )
-from .operate import (
+from lightrag.operate import (
     chunking_by_chinese_character,
     chunking_by_token_size,
     extract_entities,
@@ -30,14 +29,14 @@ from .operate import (
     mix_kg_vector_query,
     naive_query,
 )
-from .prompt import GRAPH_FIELD_SEP
-from .storage import (
+from lightrag.prompt import GRAPH_FIELD_SEP
+from lightrag.storage import (
     JsonDocStatusStorage,
     JsonKVStorage,
     NanoVectorDBStorage,
     NetworkXStorage,
 )
-from .utils import (
+from lightrag.utils import (
     EmbeddingFunc,
     compute_mdhash_id,
     convert_response_to_json,
