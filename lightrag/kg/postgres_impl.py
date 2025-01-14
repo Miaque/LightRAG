@@ -130,6 +130,7 @@ class PostgreSQLDB:
         data: Union[list, dict] = None,
         for_age: bool = False,
         graph_name: str = None,
+        upsert: bool = False,
     ):
         try:
             async with self.pool.acquire() as connection:
@@ -140,6 +141,11 @@ class PostgreSQLDB:
                     await connection.execute(sql)
                 else:
                     await connection.execute(sql, *data.values())
+        except asyncpg.exceptions.UniqueViolationError as e:
+            if upsert:
+                print("Key value duplicate, but upsert succeeded.")
+            else:
+                logger.error(f"Upsert error: {e}")
         except Exception as e:
             logger.error(f"PostgreSQL database error: {e}")
             print(sql)
@@ -151,7 +157,10 @@ class PostgreSQLDB:
         try:
             await conn.execute('SET search_path = ag_catalog, "$user", public')
             await conn.execute(f"""select create_graph('{graph_name}')""")
-        except asyncpg.exceptions.InvalidSchemaNameError:
+        except (
+            asyncpg.exceptions.InvalidSchemaNameError,
+            asyncpg.exceptions.UniqueViolationError,
+        ):
             pass
 
 
@@ -160,7 +169,6 @@ class PGKVStorage(BaseKVStorage):
     db: PostgreSQLDB = None
 
     def __post_init__(self):
-        self._data = {}
         self._max_batch_size = self.global_config["embedding_batch_num"]
 
     ################ QUERY METHODS ################
@@ -177,6 +185,19 @@ class PGKVStorage(BaseKVStorage):
         else:
             res = await self.db.query(sql, params)
         if res:
+            return res
+        else:
+            return None
+
+    async def get_by_mode_and_id(self, mode: str, id: str) -> Union[dict, None]:
+        """Specifically for llm_response_cache."""
+        sql = SQL_TEMPLATES["get_by_mode_id_" + self.namespace]
+        params = {"workspace": self.db.workspace, mode: mode, "id": id}
+        if "llm_response_cache" == self.namespace:
+            array_res = await self.db.query(sql, params, multirows=True)
+            res = {}
+            for row in array_res:
+                res[row["id"]] = row
             return res
         else:
             return None
@@ -229,33 +250,30 @@ class PGKVStorage(BaseKVStorage):
 
     ################ INSERT METHODS ################
     async def upsert(self, data: Dict[str, dict]):
-        left_data = {k: v for k, v in data.items() if k not in self._data}
-        self._data.update(left_data)
         if self.namespace == "text_chunks":
             pass
         elif self.namespace == "full_docs":
-            for k, v in self._data.items():
+            for k, v in data.items():
                 upsert_sql = SQL_TEMPLATES["upsert_doc_full"]
-                data = {
+                _data = {
                     "id": k,
                     "content": v["content"],
                     "workspace": self.db.workspace,
                 }
-                await self.db.execute(upsert_sql, data)
+                await self.db.execute(upsert_sql, _data)
         elif self.namespace == "llm_response_cache":
-            for mode, items in self._data.items():
+            for mode, items in data.items():
                 for k, v in items.items():
                     upsert_sql = SQL_TEMPLATES["upsert_llm_response_cache"]
-                    data = {
+                    _data = {
                         "workspace": self.db.workspace,
                         "id": k,
                         "original_prompt": v["original_prompt"],
-                        "return": v["return"],
+                        "return_value": v["return"],
                         "mode": mode,
                     }
-                    await self.db.execute(upsert_sql, data)
 
-        return left_data
+                    await self.db.execute(upsert_sql, _data)
 
     async def index_done_callback(self):
         if self.namespace in ["full_docs", "text_chunks"]:
@@ -557,10 +575,10 @@ class PGGraphStorage(BaseGraphStorage):
 
             if dtype == "vertex":
                 vertex = json.loads(v)
-                field = json.loads(v).get("properties")
+                field = vertex.get("properties")
                 if not field:
                     field = {}
-                field["label"] = PGGraphStorage._decode_graph_label(vertex["label"])
+                field["label"] = PGGraphStorage._decode_graph_label(field["node_id"])
                 d[k] = field
             # convert edge from id-label->id by replacing id with node information
             # we only do this if the vertex was also returned in the query
@@ -655,73 +673,8 @@ class PGGraphStorage(BaseGraphStorage):
         # otherwise return the value stripping out some common special chars
         return field.replace("(", "_").replace(")", "")
 
-    @staticmethod
-    def _wrap_query(query: str, graph_name: str, **params: str) -> str:
-        """
-        Convert a cypher query to an Apache Age compatible
-        sql query by wrapping the cypher query in ag_catalog.cypher,
-        casting results to agtype and building a select statement
-
-        Args:
-            query (str): a valid cypher query
-            graph_name (str): the name of the graph to query
-            params (dict): parameters for the query
-
-        Returns:
-            str: an equivalent pgsql query
-        """
-
-        # pgsql template
-        template = """SELECT {projection} FROM ag_catalog.cypher('{graph_name}', $$
-           {query}
-        $$) AS ({fields})"""
-
-        # if there are any returned fields they must be added to the pgsql query
-        if "return" in query.lower():
-            # parse return statement to identify returned fields
-            fields = (
-                query.lower()
-                .split("return")[-1]
-                .split("distinct")[-1]
-                .split("order by")[0]
-                .split("skip")[0]
-                .split("limit")[0]
-                .split(",")
-            )
-
-            # raise exception if RETURN * is found as we can't resolve the fields
-            if "*" in [x.strip() for x in fields]:
-                raise ValueError(
-                    "AGE graph does not support 'RETURN *'"
-                    + " statements in Cypher queries"
-                )
-
-            # get pgsql formatted field names
-            fields = [
-                PGGraphStorage._get_col_name(field, idx)
-                for idx, field in enumerate(fields)
-            ]
-
-            # build resulting pgsql relation
-            fields_str = ", ".join(
-                [field.split(".")[-1] + " agtype" for field in fields]
-            )
-
-        # if no return statement we still need to return a single field of type agtype
-        else:
-            fields_str = "a agtype"
-
-        select_str = "*"
-
-        return template.format(
-            graph_name=graph_name,
-            query=query.format(**params),
-            fields=fields_str,
-            projection=select_str,
-        )
-
     async def _query(
-        self, query: str, readonly=True, upsert_edge=False, **params: str
+        self, query: str, readonly: bool = True, upsert: bool = False
     ) -> List[Dict[str, Any]]:
         """
         Query the graph by taking a cypher query, converting it to an
@@ -735,7 +688,7 @@ class PGGraphStorage(BaseGraphStorage):
             List[Dict[str, Any]]: a list of dictionaries containing the result set
         """
         # convert cypher query to pgsql/age query
-        wrapped_query = self._wrap_query(query, self.graph_name, **params)
+        wrapped_query = query
 
         # execute the query, rolling back on an error
         try:
@@ -747,22 +700,16 @@ class PGGraphStorage(BaseGraphStorage):
                     graph_name=self.graph_name,
                 )
             else:
-                # for upserting edge, need to run the SQL twice, otherwise cannot update the properties. (First time it will try to create the edge, second time is MERGING)
-                # It is a bug of AGE as of 2025-01-03, hope it can be resolved in the future.
-                if upsert_edge:
-                    data = await self.db.execute(
-                        f"{wrapped_query};{wrapped_query};",
-                        for_age=True,
-                        graph_name=self.graph_name,
-                    )
-                else:
-                    data = await self.db.execute(
-                        wrapped_query, for_age=True, graph_name=self.graph_name
-                    )
+                data = await self.db.execute(
+                    wrapped_query,
+                    for_age=True,
+                    graph_name=self.graph_name,
+                    upsert=upsert,
+                )
         except Exception as e:
             raise PGGraphQueryException(
                 {
-                    "message": f"Error executing graph query: {query.format(**params)}",
+                    "message": f"Error executing graph query: {query}",
                     "wrapped": wrapped_query,
                     "detail": str(e),
                 }
@@ -777,77 +724,85 @@ class PGGraphStorage(BaseGraphStorage):
         return result
 
     async def has_node(self, node_id: str) -> bool:
-        entity_name_label = node_id.strip('"')
+        entity_name_label = PGGraphStorage._encode_graph_label(node_id.strip('"'))
 
-        query = """MATCH (n:`{label}`) RETURN count(n) > 0 AS node_exists"""
-        params = {"label": PGGraphStorage._encode_graph_label(entity_name_label)}
-        single_result = (await self._query(query, **params))[0]
+        query = """SELECT * FROM cypher('%s', $$
+                     MATCH (n:Entity {node_id: "%s"})
+                     RETURN count(n) > 0 AS node_exists
+                   $$) AS (node_exists bool)""" % (self.graph_name, entity_name_label)
+
+        single_result = (await self._query(query))[0]
         logger.debug(
             "{%s}:query:{%s}:result:{%s}",
             inspect.currentframe().f_code.co_name,
-            query.format(**params),
+            query,
             single_result["node_exists"],
         )
 
         return single_result["node_exists"]
 
     async def has_edge(self, source_node_id: str, target_node_id: str) -> bool:
-        entity_name_label_source = source_node_id.strip('"')
-        entity_name_label_target = target_node_id.strip('"')
+        src_label = PGGraphStorage._encode_graph_label(source_node_id.strip('"'))
+        tgt_label = PGGraphStorage._encode_graph_label(target_node_id.strip('"'))
 
-        query = """MATCH (a:`{src_label}`)-[r]-(b:`{tgt_label}`)
-                RETURN COUNT(r) > 0 AS edge_exists"""
-        params = {
-            "src_label": PGGraphStorage._encode_graph_label(entity_name_label_source),
-            "tgt_label": PGGraphStorage._encode_graph_label(entity_name_label_target),
-        }
-        single_result = (await self._query(query, **params))[0]
+        query = """SELECT * FROM cypher('%s', $$
+                     MATCH (a:Entity {node_id: "%s"})-[r]-(b:Entity {node_id: "%s"})
+                     RETURN COUNT(r) > 0 AS edge_exists
+                   $$) AS (edge_exists bool)""" % (
+            self.graph_name,
+            src_label,
+            tgt_label,
+        )
+
+        single_result = (await self._query(query))[0]
         logger.debug(
             "{%s}:query:{%s}:result:{%s}",
             inspect.currentframe().f_code.co_name,
-            query.format(**params),
+            query,
             single_result["edge_exists"],
         )
         return single_result["edge_exists"]
 
     async def get_node(self, node_id: str) -> Union[dict, None]:
-        entity_name_label = node_id.strip('"')
-        query = """MATCH (n:`{label}`) RETURN n"""
-        params = {"label": PGGraphStorage._encode_graph_label(entity_name_label)}
-        record = await self._query(query, **params)
+        label = PGGraphStorage._encode_graph_label(node_id.strip('"'))
+        query = """SELECT * FROM cypher('%s', $$
+                     MATCH (n:Entity {node_id: "%s"})
+                     RETURN n
+                   $$) AS (n agtype)""" % (self.graph_name, label)
+        record = await self._query(query)
         if record:
             node = record[0]
             node_dict = node["n"]
             logger.debug(
                 "{%s}: query: {%s}, result: {%s}",
                 inspect.currentframe().f_code.co_name,
-                query.format(**params),
+                query,
                 node_dict,
             )
             return node_dict
         return None
 
     async def node_degree(self, node_id: str) -> int:
-        entity_name_label = node_id.strip('"')
+        label = PGGraphStorage._encode_graph_label(node_id.strip('"'))
 
-        query = """MATCH (n:`{label}`)-[]->(x) RETURN count(x) AS total_edge_count"""
-        params = {"label": PGGraphStorage._encode_graph_label(entity_name_label)}
-        record = (await self._query(query, **params))[0]
+        query = """SELECT * FROM cypher('%s', $$
+                     MATCH (n:Entity {node_id: "%s"})-[]->(x)
+                     RETURN count(x) AS total_edge_count
+                   $$) AS (total_edge_count integer)""" % (self.graph_name, label)
+        record = (await self._query(query))[0]
         if record:
             edge_count = int(record["total_edge_count"])
             logger.debug(
                 "{%s}:query:{%s}:result:{%s}",
                 inspect.currentframe().f_code.co_name,
-                query.format(**params),
+                query,
                 edge_count,
             )
             return edge_count
 
     async def edge_degree(self, src_id: str, tgt_id: str) -> int:
-        entity_name_label_source = src_id.strip('"')
-        entity_name_label_target = tgt_id.strip('"')
-        src_degree = await self.node_degree(entity_name_label_source)
-        trg_degree = await self.node_degree(entity_name_label_target)
+        src_degree = await self.node_degree(src_id)
+        trg_degree = await self.node_degree(tgt_id)
 
         # Convert None to 0 for addition
         src_degree = 0 if src_degree is None else src_degree
@@ -874,23 +829,25 @@ class PGGraphStorage(BaseGraphStorage):
         Returns:
             list: List of all relationships/edges found
         """
-        entity_name_label_source = source_node_id.strip('"')
-        entity_name_label_target = target_node_id.strip('"')
+        src_label = PGGraphStorage._encode_graph_label(source_node_id.strip('"'))
+        tgt_label = PGGraphStorage._encode_graph_label(target_node_id.strip('"'))
 
-        query = """MATCH (a:`{src_label}`)-[r]->(b:`{tgt_label}`)
-                RETURN properties(r) as edge_properties
-                LIMIT 1"""
-        params = {
-            "src_label": PGGraphStorage._encode_graph_label(entity_name_label_source),
-            "tgt_label": PGGraphStorage._encode_graph_label(entity_name_label_target),
-        }
-        record = await self._query(query, **params)
+        query = """SELECT * FROM cypher('%s', $$
+                     MATCH (a:Entity {node_id: "%s"})-[r]->(b:Entity {node_id: "%s"})
+                     RETURN properties(r) as edge_properties
+                     LIMIT 1
+                   $$) AS (edge_properties agtype)""" % (
+            self.graph_name,
+            src_label,
+            tgt_label,
+        )
+        record = await self._query(query)
         if record and record[0] and record[0]["edge_properties"]:
             result = record[0]["edge_properties"]
             logger.debug(
                 "{%s}:query:{%s}:result:{%s}",
                 inspect.currentframe().f_code.co_name,
-                query.format(**params),
+                query,
                 result,
             )
             return result
@@ -900,24 +857,31 @@ class PGGraphStorage(BaseGraphStorage):
         Retrieves all edges (relationships) for a particular node identified by its label.
         :return: List of dictionaries containing edge information
         """
-        node_label = source_node_id.strip('"')
+        label = PGGraphStorage._encode_graph_label(source_node_id.strip('"'))
 
-        query = """MATCH (n:`{label}`)
-                OPTIONAL MATCH (n)-[r]-(connected)
-                RETURN n, r, connected"""
-        params = {"label": PGGraphStorage._encode_graph_label(node_label)}
-        results = await self._query(query, **params)
+        query = """SELECT * FROM cypher('%s', $$
+                      MATCH (n:Entity {node_id: "%s"})
+                      OPTIONAL MATCH (n)-[r]-(connected)
+                      RETURN n, r, connected
+                    $$) AS (n agtype, r agtype, connected agtype)""" % (
+            self.graph_name,
+            label,
+        )
+
+        results = await self._query(query)
         edges = []
         for record in results:
             source_node = record["n"] if record["n"] else None
             connected_node = record["connected"] if record["connected"] else None
 
             source_label = (
-                source_node["label"] if source_node and source_node["label"] else None
+                source_node["node_id"]
+                if source_node and source_node["node_id"]
+                else None
             )
             target_label = (
-                connected_node["label"]
-                if connected_node and connected_node["label"]
+                connected_node["node_id"]
+                if connected_node and connected_node["node_id"]
                 else None
             )
 
@@ -939,17 +903,21 @@ class PGGraphStorage(BaseGraphStorage):
             node_id: The unique identifier for the node (used as label)
             node_data: Dictionary of node properties
         """
-        label = node_id.strip('"')
+        label = PGGraphStorage._encode_graph_label(node_id.strip('"'))
         properties = node_data
 
-        query = """MERGE (n:`{label}`)
-                SET n += {properties}"""
-        params = {
-            "label": PGGraphStorage._encode_graph_label(label),
-            "properties": PGGraphStorage._format_properties(properties),
-        }
+        query = """SELECT * FROM cypher('%s', $$
+                     MERGE (n:Entity {node_id: "%s"})
+                     SET n += %s
+                     RETURN n
+                   $$) AS (n agtype)""" % (
+            self.graph_name,
+            label,
+            PGGraphStorage._format_properties(properties),
+        )
+
         try:
-            await self._query(query, readonly=False, **params)
+            await self._query(query, readonly=False, upsert=True)
             logger.debug(
                 "Upserted node with label '{%s}' and properties: {%s}",
                 label,
@@ -975,31 +943,30 @@ class PGGraphStorage(BaseGraphStorage):
             target_node_id (str): Label of the target node (used as identifier)
             edge_data (dict): Dictionary of properties to set on the edge
         """
-        source_node_label = source_node_id.strip('"')
-        target_node_label = target_node_id.strip('"')
+        src_label = PGGraphStorage._encode_graph_label(source_node_id.strip('"'))
+        tgt_label = PGGraphStorage._encode_graph_label(target_node_id.strip('"'))
         edge_properties = edge_data
-        logger.info(
-            f"-- inserting edge: {source_node_label} -> {target_node_label}: {edge_data}"
-        )
 
-        query = """MATCH (source:`{src_label}`)
-                WITH source
-                MATCH (target:`{tgt_label}`)
-                MERGE (source)-[r:DIRECTED]->(target)
-                SET r += {properties}
-                RETURN r"""
-        params = {
-            "src_label": PGGraphStorage._encode_graph_label(source_node_label),
-            "tgt_label": PGGraphStorage._encode_graph_label(target_node_label),
-            "properties": PGGraphStorage._format_properties(edge_properties),
-        }
+        query = """SELECT * FROM cypher('%s', $$
+                     MATCH (source:Entity {node_id: "%s"})
+                     WITH source
+                     MATCH (target:Entity {node_id: "%s"})
+                     MERGE (source)-[r:DIRECTED]->(target)
+                     SET r += %s
+                     RETURN r
+                   $$) AS (r agtype)""" % (
+            self.graph_name,
+            src_label,
+            tgt_label,
+            PGGraphStorage._format_properties(edge_properties),
+        )
         # logger.info(f"-- inserting edge after formatted: {params}")
         try:
-            await self._query(query, readonly=False, upsert_edge=True, **params)
+            await self._query(query, readonly=False, upsert=True)
             logger.debug(
                 "Upserted edge from '{%s}' to '{%s}' with properties: {%s}",
-                source_node_label,
-                target_node_label,
+                src_label,
+                tgt_label,
                 edge_properties,
             )
         except Exception as e:
@@ -1029,8 +996,8 @@ TABLES = {
                     doc_name VARCHAR(1024),
                     content TEXT,
                     meta JSONB,
-                    createtime TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updatetime TIMESTAMP,
+                    create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    update_time TIMESTAMP,
 	                CONSTRAINT LIGHTRAG_DOC_FULL_PK PRIMARY KEY (workspace, id)
                     )"""
     },
@@ -1043,8 +1010,8 @@ TABLES = {
                     tokens INTEGER,
                     content TEXT,
                     content_vector VECTOR,
-                    createtime TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updatetime TIMESTAMP,
+                    create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    update_time TIMESTAMP,
 	                CONSTRAINT LIGHTRAG_DOC_CHUNKS_PK PRIMARY KEY (workspace, id)
                     )"""
     },
@@ -1055,8 +1022,8 @@ TABLES = {
                     entity_name VARCHAR(255),
                     content TEXT,
                     content_vector VECTOR,
-                    createtime TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updatetime TIMESTAMP,
+                    create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    update_time TIMESTAMP,
 	                CONSTRAINT LIGHTRAG_VDB_ENTITY_PK PRIMARY KEY (workspace, id)
                     )"""
     },
@@ -1068,8 +1035,8 @@ TABLES = {
                     target_id VARCHAR(256),
                     content TEXT,
                     content_vector VECTOR,
-                    createtime TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updatetime TIMESTAMP,
+                    create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    update_time TIMESTAMP,
 	                CONSTRAINT LIGHTRAG_VDB_RELATION_PK PRIMARY KEY (workspace, id)
                     )"""
     },
@@ -1079,10 +1046,10 @@ TABLES = {
 	                id varchar(255) NOT NULL,
 	                mode varchar(32) NOT NULL,
                     original_prompt TEXT,
-                    return TEXT,
-                    createtime TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updatetime TIMESTAMP,
-	                CONSTRAINT LIGHTRAG_LLM_CACHE_PK PRIMARY KEY (workspace, id)
+                    return_value TEXT,
+                    create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    update_time TIMESTAMP,
+	                CONSTRAINT LIGHTRAG_LLM_CACHE_PK PRIMARY KEY (workspace, mode, id)
                     )"""
     },
     "LIGHTRAG_DOC_STATUS": {
@@ -1110,9 +1077,12 @@ SQL_TEMPLATES = {
                                 chunk_order_index, full_doc_id
                                 FROM LIGHTRAG_DOC_CHUNKS WHERE workspace=$1 AND id=$2
                             """,
-    "get_by_id_llm_response_cache": """SELECT id, original_prompt, COALESCE("return", '') as "return", mode
+    "get_by_id_llm_response_cache": """SELECT id, original_prompt, COALESCE(return_value, '') as "return", mode
                                 FROM LIGHTRAG_LLM_CACHE WHERE workspace=$1 AND mode=$2
                                """,
+    "get_by_mode_id_llm_response_cache": """SELECT id, original_prompt, COALESCE(return_value, '') as "return", mode
+                           FROM LIGHTRAG_LLM_CACHE WHERE workspace=$1 AND mode=$2 AND id=$3
+                          """,
     "get_by_ids_full_docs": """SELECT id, COALESCE(content, '') as content
                                  FROM LIGHTRAG_DOC_FULL WHERE workspace=$1 AND id IN ({ids})
                             """,
@@ -1120,22 +1090,22 @@ SQL_TEMPLATES = {
                                   chunk_order_index, full_doc_id
                                    FROM LIGHTRAG_DOC_CHUNKS WHERE workspace=$1 AND id IN ({ids})
                                 """,
-    "get_by_ids_llm_response_cache": """SELECT id, original_prompt, COALESCE("return", '') as "return", mode
+    "get_by_ids_llm_response_cache": """SELECT id, original_prompt, COALESCE(return_value, '') as "return", mode
                                  FROM LIGHTRAG_LLM_CACHE WHERE workspace=$1 AND mode= IN ({ids})
                                 """,
     "filter_keys": "SELECT id FROM {table_name} WHERE workspace=$1 AND id IN ({ids})",
     "upsert_doc_full": """INSERT INTO LIGHTRAG_DOC_FULL (id, content, workspace)
                         VALUES ($1, $2, $3)
                         ON CONFLICT (workspace,id) DO UPDATE
-                           SET content = $2, updatetime = CURRENT_TIMESTAMP
+                           SET content = $2, update_time = CURRENT_TIMESTAMP
                        """,
-    "upsert_llm_response_cache": """INSERT INTO LIGHTRAG_LLM_CACHE(workspace,id,original_prompt,"return",mode)
+    "upsert_llm_response_cache": """INSERT INTO LIGHTRAG_LLM_CACHE(workspace,id,original_prompt,return_value,mode)
                                       VALUES ($1, $2, $3, $4, $5)
-                                      ON CONFLICT (workspace,id) DO UPDATE
+                                      ON CONFLICT (workspace,mode,id) DO UPDATE
                                       SET original_prompt = EXCLUDED.original_prompt,
-                                      "return"=EXCLUDED."return",
+                                      return_value=EXCLUDED.return_value,
                                       mode=EXCLUDED.mode,
-                                      updatetime = CURRENT_TIMESTAMP
+                                      update_time = CURRENT_TIMESTAMP
                                      """,
     "upsert_chunk": """INSERT INTO LIGHTRAG_DOC_CHUNKS (workspace, id, tokens,
                       chunk_order_index, full_doc_id, content, content_vector)
@@ -1146,7 +1116,7 @@ SQL_TEMPLATES = {
                       full_doc_id=EXCLUDED.full_doc_id,
                       content = EXCLUDED.content,
                       content_vector=EXCLUDED.content_vector,
-                      updatetime = CURRENT_TIMESTAMP
+                      update_time = CURRENT_TIMESTAMP
                      """,
     "upsert_entity": """INSERT INTO LIGHTRAG_VDB_ENTITY (workspace, id, entity_name, content, content_vector)
                       VALUES ($1, $2, $3, $4, $5)
@@ -1154,7 +1124,7 @@ SQL_TEMPLATES = {
                       SET entity_name=EXCLUDED.entity_name,
                       content=EXCLUDED.content,
                       content_vector=EXCLUDED.content_vector,
-                      updatetime=CURRENT_TIMESTAMP
+                      update_time=CURRENT_TIMESTAMP
                      """,
     "upsert_relationship": """INSERT INTO LIGHTRAG_VDB_RELATION (workspace, id, source_id,
                       target_id, content, content_vector)
@@ -1163,7 +1133,7 @@ SQL_TEMPLATES = {
                       SET source_id=EXCLUDED.source_id,
                       target_id=EXCLUDED.target_id,
                       content=EXCLUDED.content,
-                      content_vector=EXCLUDED.content_vector, updatetime = CURRENT_TIMESTAMP
+                      content_vector=EXCLUDED.content_vector, update_time = CURRENT_TIMESTAMP
                      """,
     # SQL for VectorStorage
     "entities": """SELECT entity_name FROM

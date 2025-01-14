@@ -12,7 +12,7 @@
     </p>
      <p>
           <img src='https://img.shields.io/github/stars/hkuds/lightrag?color=green&style=social' />
-        <img src="https://img.shields.io/badge/python->=3.10-blue">
+        <img src="https://img.shields.io/badge/python-3.10-blue">
         <a href="https://pypi.org/project/lightrag-hku/"><img src="https://img.shields.io/pypi/v/lightrag-hku.svg"></a>
         <a href="https://pepy.tech/project/lightrag-hku"><img src="https://static.pepy.tech/badge/lightrag-hku/month"></a>
     </p>
@@ -26,6 +26,7 @@ This repository hosts the code of LightRAG. The structure of this code is based 
 </div>
 
 ## 🎉 News
+- [x] [2025.01.06]🎯📢You can now [use PostgreSQL for Storage](#using-postgresql-for-storage).
 - [x] [2024.12.31]🎯📢LightRAG now supports [deletion by document ID](https://github.com/HKUDS/LightRAG?tab=readme-ov-file#delete).
 - [x] [2024.11.25]🎯📢LightRAG now supports seamless integration of [custom knowledge graphs](https://github.com/HKUDS/LightRAG?tab=readme-ov-file#insert-custom-kg), empowering users to enhance the system with their own domain expertise.
 - [x] [2024.11.19]🎯📢A comprehensive guide to LightRAG is now available on [LearnOpenCV](https://learnopencv.com/lightrag). Many thanks to the blog author.
@@ -356,6 +357,16 @@ rag = LightRAG(
 ```
 see test_neo4j.py for a working example.
 
+### Using PostgreSQL for Storage
+For production level scenarios you will most likely want to leverage an enterprise solution. PostgreSQL can provide a one-stop solution for you as KV store, VectorDB (pgvector) and GraphDB (apache AGE).
+* PostgreSQL is lightweight,the whole binary distribution including all necessary plugins can be zipped to 40MB: Ref to [Windows Release](https://github.com/ShanGor/apache-age-windows/releases/tag/PG17%2Fv1.5.0-rc0) as it is easy to install for Linux/Mac.
+* How to start? Ref to: [examples/lightrag_zhipu_postgres_demo.py](https://github.com/HKUDS/LightRAG/blob/main/examples/lightrag_zhipu_postgres_demo.py)
+* Create index for AGE example: (Change below `dickens` to your graph name if necessary)
+  ```
+  SET search_path = ag_catalog, "$user", public;
+  CREATE INDEX idx_entity ON dickens."Entity" USING gin (agtype_access_operator(properties, '"node_id"'));
+  ```
+
 ### Insert Custom KG
 
 ```python
@@ -602,33 +613,34 @@ if __name__ == "__main__":
 
 ### LightRAG init parameters
 
-| **Parameter** | **Type** | **Explanation** | **Default** |
-| --- | --- | --- | --- |
-| **working\_dir** | `str` | Directory where the cache will be stored | `lightrag_cache+timestamp` |
-| **kv\_storage** | `str` | Storage type for documents and text chunks. Supported types: `JsonKVStorage`, `OracleKVStorage` | `JsonKVStorage` |
-| **vector\_storage** | `str` | Storage type for embedding vectors. Supported types: `NanoVectorDBStorage`, `OracleVectorDBStorage` | `NanoVectorDBStorage` |
-| **graph\_storage** | `str` | Storage type for graph edges and nodes. Supported types: `NetworkXStorage`, `Neo4JStorage`, `OracleGraphStorage` | `NetworkXStorage` |
-| **log\_level** |     | Log level for application runtime | `logging.DEBUG` |
-| **chunk\_token\_size** | `int` | Maximum token size per chunk when splitting documents | `1200` |
-| **chunk\_overlap\_token\_size** | `int` | Overlap token size between two chunks when splitting documents | `100` |
-| **tiktoken\_model\_name** | `str` | Model name for the Tiktoken encoder used to calculate token numbers | `gpt-4o-mini` |
-| **entity\_extract\_max\_gleaning** | `int` | Number of loops in the entity extraction process, appending history messages | `1` |
-| **entity\_summary\_to\_max\_tokens** | `int` | Maximum token size for each entity summary | `500` |
-| **node\_embedding\_algorithm** | `str` | Algorithm for node embedding (currently not used) | `node2vec` |
-| **node2vec\_params** | `dict` | Parameters for node embedding | `{"dimensions": 1536,"num_walks": 10,"walk_length": 40,"window_size": 2,"iterations": 3,"random_seed": 3,}` |
-| **embedding\_func** | `EmbeddingFunc` | Function to generate embedding vectors from text | `openai_embedding` |
-| **embedding\_batch\_num** | `int` | Maximum batch size for embedding processes (multiple texts sent per batch) | `32` |
-| **embedding\_func\_max\_async** | `int` | Maximum number of concurrent asynchronous embedding processes | `16` |
-| **llm\_model\_func** | `callable` | Function for LLM generation | `gpt_4o_mini_complete` |
-| **llm\_model\_name** | `str` | LLM model name for generation | `meta-llama/Llama-3.2-1B-Instruct` |
-| **llm\_model\_max\_token\_size** | `int` | Maximum token size for LLM generation (affects entity relation summaries) | `32768` |
-| **llm\_model\_max\_async** | `int` | Maximum number of concurrent asynchronous LLM processes | `16` |
-| **llm\_model\_kwargs** | `dict` | Additional parameters for LLM generation |     |
-| **vector\_db\_storage\_cls\_kwargs** | `dict` | Additional parameters for vector database (currently not used) |     |
-| **enable\_llm\_cache** | `bool` | If `TRUE`, stores LLM results in cache; repeated prompts return cached responses | `TRUE` |
-| **addon\_params** | `dict` | Additional parameters, e.g., `{"example_number": 1, "language": "Simplified Chinese", "entity_types": ["organization", "person", "geo", "event"], "insert_batch_size": 10}`: sets example limit, output language, and batch size for document processing | `example_number: all examples, language: English, insert_batch_size: 10` |
-| **convert\_response\_to\_json\_func** | `callable` | Not used | `convert_response_to_json` |
-| **embedding\_cache\_config** | `dict` | Configuration for question-answer caching. Contains three parameters:<br>- `enabled`: Boolean value to enable/disable cache lookup functionality. When enabled, the system will check cached responses before generating new answers.<br>- `similarity_threshold`: Float value (0-1), similarity threshold. When a new question's similarity with a cached question exceeds this threshold, the cached answer will be returned directly without calling the LLM.<br>- `use_llm_check`: Boolean value to enable/disable LLM similarity verification. When enabled, LLM will be used as a secondary check to verify the similarity between questions before returning cached answers. | Default: `{"enabled": False, "similarity_threshold": 0.95, "use_llm_check": False}` |
+| **Parameter**                                | **Type** | **Explanation**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | **Default**                                                                                                 |
+|----------------------------------------------| --- |-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------|
+| **working\_dir**                             | `str` | Directory where the cache will be stored                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | `lightrag_cache+timestamp`                                                                                  |
+| **kv\_storage**                              | `str` | Storage type for documents and text chunks. Supported types: `JsonKVStorage`, `OracleKVStorage`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | `JsonKVStorage`                                                                                             |
+| **vector\_storage**                          | `str` | Storage type for embedding vectors. Supported types: `NanoVectorDBStorage`, `OracleVectorDBStorage`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | `NanoVectorDBStorage`                                                                                       |
+| **graph\_storage**                           | `str` | Storage type for graph edges and nodes. Supported types: `NetworkXStorage`, `Neo4JStorage`, `OracleGraphStorage`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | `NetworkXStorage`                                                                                           |
+| **log\_level**                               |     | Log level for application runtime                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | `logging.DEBUG`                                                                                             |
+| **chunk\_token\_size**                       | `int` | Maximum token size per chunk when splitting documents                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | `1200`                                                                                                      |
+| **chunk\_overlap\_token\_size**              | `int` | Overlap token size between two chunks when splitting documents                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | `100`                                                                                                       |
+| **tiktoken\_model\_name**                    | `str` | Model name for the Tiktoken encoder used to calculate token numbers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | `gpt-4o-mini`                                                                                               |
+| **entity\_extract\_max\_gleaning**           | `int` | Number of loops in the entity extraction process, appending history messages                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | `1`                                                                                                         |
+| **entity\_summary\_to\_max\_tokens**         | `int` | Maximum token size for each entity summary                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | `500`                                                                                                       |
+| **node\_embedding\_algorithm**               | `str` | Algorithm for node embedding (currently not used)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | `node2vec`                                                                                                  |
+| **node2vec\_params**                         | `dict` | Parameters for node embedding                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | `{"dimensions": 1536,"num_walks": 10,"walk_length": 40,"window_size": 2,"iterations": 3,"random_seed": 3,}` |
+| **embedding\_func**                          | `EmbeddingFunc` | Function to generate embedding vectors from text                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | `openai_embedding`                                                                                          |
+| **embedding\_batch\_num**                    | `int` | Maximum batch size for embedding processes (multiple texts sent per batch)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | `32`                                                                                                        |
+| **embedding\_func\_max\_async**              | `int` | Maximum number of concurrent asynchronous embedding processes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | `16`                                                                                                        |
+| **llm\_model\_func**                         | `callable` | Function for LLM generation                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | `gpt_4o_mini_complete`                                                                                      |
+| **llm\_model\_name**                         | `str` | LLM model name for generation                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | `meta-llama/Llama-3.2-1B-Instruct`                                                                          |
+| **llm\_model\_max\_token\_size**             | `int` | Maximum token size for LLM generation (affects entity relation summaries)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | `32768`                                                                                                     |
+| **llm\_model\_max\_async**                   | `int` | Maximum number of concurrent asynchronous LLM processes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | `16`                                                                                                        |
+| **llm\_model\_kwargs**                       | `dict` | Additional parameters for LLM generation                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |                                                                                                             |
+| **vector\_db\_storage\_cls\_kwargs**         | `dict` | Additional parameters for vector database (currently not used)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |                                                                                                             |
+| **enable\_llm\_cache**                       | `bool` | If `TRUE`, stores LLM results in cache; repeated prompts return cached responses                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | `TRUE`                                                                                                      |
+| **enable\_llm\_cache\_for\_entity\_extract** | `bool` | If `TRUE`, stores LLM results in cache for entity extraction; Good for beginners to debug your application                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | `TRUE`                                                                                                     |
+| **addon\_params**                            | `dict` | Additional parameters, e.g., `{"example_number": 1, "language": "Simplified Chinese", "entity_types": ["organization", "person", "geo", "event"], "insert_batch_size": 10}`: sets example limit, output language, and batch size for document processing                                                                                                                                                                                                                                                                                                                                                                                                                            | `example_number: all examples, language: English, insert_batch_size: 10`                                    |
+| **convert\_response\_to\_json\_func**        | `callable` | Not used                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | `convert_response_to_json`                                                                                  |
+| **embedding\_cache\_config**                 | `dict` | Configuration for question-answer caching. Contains three parameters:<br>- `enabled`: Boolean value to enable/disable cache lookup functionality. When enabled, the system will check cached responses before generating new answers.<br>- `similarity_threshold`: Float value (0-1), similarity threshold. When a new question's similarity with a cached question exceeds this threshold, the cached answer will be returned directly without calling the LLM.<br>- `use_llm_check`: Boolean value to enable/disable LLM similarity verification. When enabled, LLM will be used as a secondary check to verify the similarity between questions before returning cached answers. | Default: `{"enabled": False, "similarity_threshold": 0.95, "use_llm_check": False}`                         |
 
 ### Error Handling
 <details>
@@ -880,69 +892,6 @@ def extract_queries(file_path):
 ```
 </details>
 
-## Code Structure
-
-```python
-.
-├── .github/
-│   ├── workflows/
-│   │   └── linting.yaml
-├── examples/
-│   ├── batch_eval.py
-│   ├── generate_query.py
-│   ├── graph_visual_with_html.py
-│   ├── graph_visual_with_neo4j.py
-│   ├── insert_custom_kg.py
-│   ├── lightrag_api_openai_compatible_demo.py
-│   ├── lightrag_api_oracle_demo..py
-│   ├── lightrag_azure_openai_demo.py
-│   ├── lightrag_bedrock_demo.py
-│   ├── lightrag_hf_demo.py
-│   ├── lightrag_lmdeploy_demo.py
-│   ├── lightrag_nvidia_demo.py
-│   ├── lightrag_ollama_demo.py
-│   ├── lightrag_openai_compatible_demo.py
-│   ├── lightrag_openai_demo.py
-│   ├── lightrag_oracle_demo.py
-│   ├── lightrag_siliconcloud_demo.py
-│   └── vram_management_demo.py
-├── lightrag/
-│   ├── api/
-│   │   ├── lollms_lightrag_server.py
-│   │   ├── ollama_lightrag_server.py
-│   │   ├── openai_lightrag_server.py
-│   │   ├── azure_openai_lightrag_server.py
-│   │   └── requirements.txt
-│   ├── kg/
-│   │   ├── __init__.py
-│   │   ├── oracle_impl.py
-│   │   └── neo4j_impl.py
-│   ├── __init__.py
-│   ├── base.py
-│   ├── lightrag.py
-│   ├── llm.py
-│   ├── operate.py
-│   ├── prompt.py
-│   ├── storage.py
-│   └── utils.py
-├── reproduce/
-│   ├── Step_0.py
-│   ├── Step_1_openai_compatible.py
-│   ├── Step_1.py
-│   ├── Step_2.py
-│   ├── Step_3_openai_compatible.py
-│   └── Step_3.py
-├── .gitignore
-├── .pre-commit-config.yaml
-├── get_all_edges_nx.py
-├── LICENSE
-├── README.md
-├── requirements.txt
-├── setup.py
-├── test_neo4j.py
-└── test.py
-```
-
 ## Install with API Support
 
 LightRAG provides optional API support through FastAPI servers that add RAG capabilities to existing LLM services. You can install LightRAG with API support in two ways:
@@ -968,12 +917,14 @@ pip install -e ".[api]"
 
 ### Prerequisites
 
-Before running any of the servers, ensure you have the corresponding backend service running:
+Before running any of the servers, ensure you have the corresponding backend service running for both llm and embedding.
+The new api allows you to mix different bindings for llm/embeddings.
+For example, you have the possibility to use ollama for the embedding and openai for the llm.
 
 #### For LoLLMs Server
 - LoLLMs must be running and accessible
 - Default connection: http://localhost:9600
-- Configure using --lollms-host if running on a different host/port
+- Configure using --llm-binding-host and/or --embedding-binding-host if running on a different host/port
 
 #### For Ollama Server
 - Ollama must be running and accessible
@@ -1009,113 +960,96 @@ The output of the last command will give you the endpoint and the key for the Op
 
 Each server has its own specific configuration options:
 
-#### LoLLMs Server Options
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| --host | 0.0.0.0 | RAG server host |
-| --port | 9621 | RAG server port |
-| --model | mistral-nemo:latest | LLM model name |
-| --embedding-model | bge-m3:latest | Embedding model name |
-| --lollms-host | http://localhost:9600 | LoLLMS backend URL |
-| --working-dir | ./rag_storage | Working directory for RAG |
-| --max-async | 4 | Maximum async operations |
-| --max-tokens | 32768 | Maximum token size |
-| --embedding-dim | 1024 | Embedding dimensions |
-| --max-embed-tokens | 8192 | Maximum embedding token size |
-| --input-file | ./book.txt | Initial input file |
-| --log-level | INFO | Logging level |
-| --key | none | Access Key to protect the lightrag service |
-
-#### Ollama Server Options
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| --host | 0.0.0.0 | RAG server host |
-| --port | 9621 | RAG server port |
-| --model | mistral-nemo:latest | LLM model name |
-| --embedding-model | bge-m3:latest | Embedding model name |
-| --ollama-host | http://localhost:11434 | Ollama backend URL |
-| --working-dir | ./rag_storage | Working directory for RAG |
-| --max-async | 4 | Maximum async operations |
-| --max-tokens | 32768 | Maximum token size |
-| --embedding-dim | 1024 | Embedding dimensions |
-| --max-embed-tokens | 8192 | Maximum embedding token size |
-| --input-file | ./book.txt | Initial input file |
-| --log-level | INFO | Logging level |
-| --key | none | Access Key to protect the lightrag service |
-
-#### OpenAI Server Options
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| --host | 0.0.0.0 | RAG server host |
-| --port | 9621 | RAG server port |
-| --model | gpt-4 | OpenAI model name |
-| --embedding-model | text-embedding-3-large | OpenAI embedding model |
-| --working-dir | ./rag_storage | Working directory for RAG |
-| --max-tokens | 32768 | Maximum token size |
-| --max-embed-tokens | 8192 | Maximum embedding token size |
-| --input-dir | ./inputs | Input directory for documents |
-| --log-level | INFO | Logging level |
-| --key | none | Access Key to protect the lightrag service |
-
-#### OpenAI AZURE Server Options
+#### LightRag Server Options
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | --host | 0.0.0.0 | Server host |
 | --port | 9621 | Server port |
-| --model | gpt-4 | OpenAI model name |
-| --embedding-model | text-embedding-3-large | OpenAI embedding model |
-| --working-dir | ./rag_storage | Working directory for RAG |
+| --llm-binding | ollama | LLM binding to be used. Supported: lollms, ollama, openai |
+| --llm-binding-host | (dynamic) | LLM server host URL. Defaults based on binding: http://localhost:11434 (ollama), http://localhost:9600 (lollms), https://api.openai.com/v1 (openai) |
+| --llm-model | mistral-nemo:latest | LLM model name |
+| --embedding-binding | ollama | Embedding binding to be used. Supported: lollms, ollama, openai |
+| --embedding-binding-host | (dynamic) | Embedding server host URL. Defaults based on binding: http://localhost:11434 (ollama), http://localhost:9600 (lollms), https://api.openai.com/v1 (openai) |
+| --embedding-model | bge-m3:latest | Embedding model name |
+| --working-dir | ./rag_storage | Working directory for RAG storage |
+| --input-dir | ./inputs | Directory containing input documents |
+| --max-async | 4 | Maximum async operations |
 | --max-tokens | 32768 | Maximum token size |
+| --embedding-dim | 1024 | Embedding dimensions |
 | --max-embed-tokens | 8192 | Maximum embedding token size |
-| --input-dir | ./inputs | Input directory for documents |
-| --enable-cache | True | Enable response cache |
-| --log-level | INFO | Logging level |
-| --key | none | Access Key to protect the lightrag service |
+| --timeout | None | Timeout in seconds (useful when using slow AI). Use None for infinite timeout |
+| --log-level | INFO | Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL) |
+| --key | None | API key for authentication. Protects lightrag server against unauthorized access |
+| --ssl | False | Enable HTTPS |
+| --ssl-certfile | None | Path to SSL certificate file (required if --ssl is enabled) |
+| --ssl-keyfile | None | Path to SSL private key file (required if --ssl is enabled) |
+
 
 
 For protecting the server using an authentication key, you can also use an environment variable named `LIGHTRAG_API_KEY`.
 ### Example Usage
 
-#### LoLLMs RAG Server
+#### Running a Lightrag server with ollama default local server as llm and embedding backends
+
+Ollama is the default backend for both llm and embedding, so by default you can run lightrag-server with no parameters and the default ones will be used. Make sure ollama is installed and is running and default models are already installed on ollama.
 
 ```bash
-# Custom configuration with specific model and working directory
-lollms-lightrag-server --model mistral-nemo --port 8080 --working-dir ./custom_rag
+# Run lightrag with ollama, mistral-nemo:latest for llm, and bge-m3:latest for embedding
+lightrag-server
 
-# Using specific models (ensure they are installed in your LoLLMs instance)
-lollms-lightrag-server --model mistral-nemo:latest --embedding-model bge-m3 --embedding-dim 1024
+# Using specific models (ensure they are installed in your ollama instance)
+lightrag-server --llm-model adrienbrault/nous-hermes2theta-llama3-8b:f16 --embedding-model nomic-embed-text --embedding-dim 1024
 
-# Using specific models and an authentication key
-lollms-lightrag-server --model mistral-nemo:latest --embedding-model bge-m3 --embedding-dim 1024 --key ky-mykey
+# Using an authentication key
+lightrag-server --key my-key
 
+# Using lollms for llm and ollama for embedding
+lightrag-server --llm-binding lollms
 ```
 
-#### Ollama RAG Server
+#### Running a Lightrag server with lollms default local server as llm and embedding backends
 
 ```bash
-# Custom configuration with specific model and working directory
-ollama-lightrag-server --model mistral-nemo:latest --port 8080 --working-dir ./custom_rag
+# Run lightrag with lollms, mistral-nemo:latest for llm, and bge-m3:latest for embedding, use lollms for both llm and embedding
+lightrag-server --llm-binding lollms --embedding-binding lollms
 
-# Using specific models (ensure they are installed in your Ollama instance)
-ollama-lightrag-server --model mistral-nemo:latest --embedding-model bge-m3 --embedding-dim 1024
+# Using specific models (ensure they are installed in your ollama instance)
+lightrag-server --llm-binding lollms --llm-model adrienbrault/nous-hermes2theta-llama3-8b:f16 --embedding-binding lollms --embedding-model nomic-embed-text --embedding-dim 1024
+
+# Using an authentication key
+lightrag-server --key my-key
+
+# Using lollms for llm and openai for embedding
+lightrag-server --llm-binding lollms --embedding-binding openai --embedding-model text-embedding-3-small
 ```
 
-#### OpenAI RAG Server
+
+#### Running a Lightrag server with openai server as llm and embedding backends
 
 ```bash
-# Using GPT-4 with text-embedding-3-large
-openai-lightrag-server --port 9624 --model gpt-4 --embedding-model text-embedding-3-large
-```
-#### Azure OpenAI RAG Server
-```bash
-# Using GPT-4 with text-embedding-3-large
-azure-openai-lightrag-server --model gpt-4o --port 8080 --working-dir ./custom_rag --embedding-model text-embedding-3-large
+# Run lightrag with lollms, GPT-4o-mini  for llm, and text-embedding-3-small for embedding, use openai for both llm and embedding
+lightrag-server --llm-binding openai --llm-model GPT-4o-mini --embedding-binding openai --embedding-model text-embedding-3-small
+
+# Using an authentication key
+lightrag-server --llm-binding openai --llm-model GPT-4o-mini --embedding-binding openai --embedding-model text-embedding-3-small --key my-key
+
+# Using lollms for llm and openai for embedding
+lightrag-server --llm-binding lollms --embedding-binding openai --embedding-model text-embedding-3-small
 ```
 
+#### Running a Lightrag server with azure openai server as llm and embedding backends
+
+```bash
+# Run lightrag with lollms, GPT-4o-mini  for llm, and text-embedding-3-small for embedding, use openai for both llm and embedding
+lightrag-server --llm-binding azure_openai --llm-model GPT-4o-mini --embedding-binding openai --embedding-model text-embedding-3-small
+
+# Using an authentication key
+lightrag-server --llm-binding azure_openai --llm-model GPT-4o-mini --embedding-binding azure_openai --embedding-model text-embedding-3-small --key my-key
+
+# Using lollms for llm and azure_openai for embedding
+lightrag-server --llm-binding lollms --embedding-binding azure_openai --embedding-model text-embedding-3-small
+```
 
 **Important Notes:**
 - For LoLLMs: Make sure the specified models are installed in your LoLLMs instance
@@ -1125,10 +1059,7 @@ azure-openai-lightrag-server --model gpt-4o --port 8080 --working-dir ./custom_r
 
 For help on any server, use the --help flag:
 ```bash
-lollms-lightrag-server --help
-ollama-lightrag-server --help
-openai-lightrag-server --help
-azure-openai-lightrag-server --help
+lightrag-server --help
 ```
 
 Note: If you don't need the API functionality, you can install the base package without API support using:
@@ -1148,7 +1079,7 @@ Query the RAG system with options for different search modes.
 ```bash
 curl -X POST "http://localhost:9621/query" \
     -H "Content-Type: application/json" \
-    -d '{"query": "Your question here", "mode": "hybrid"}'
+    -d '{"query": "Your question here", "mode": "hybrid", ""}'
 ```
 
 #### POST /query/stream
@@ -1206,6 +1137,7 @@ curl "http://localhost:9621/health"
 ```
 
 ## Development
+Contribute to the project: [Guide](contributor-readme.MD)
 
 ### Running in Development Mode
 

@@ -1,7 +1,7 @@
 import asyncio
 import json
 import re
-import warnings
+import time
 from collections import Counter, defaultdict
 from typing import Union
 
@@ -36,35 +36,64 @@ from lightrag.utils import (
     split_string_by_multi_markers,
     truncate_list_by_token_size,
 )
-from .base import (
-    BaseGraphStorage,
-    BaseKVStorage,
-    BaseVectorStorage,
-    TextChunkSchema,
-    QueryParam,
-)
-from .prompt import GRAPH_FIELD_SEP, PROMPTS
-import time
 
 
 def chunking_by_token_size(
-    content: str, overlap_token_size=128, max_token_size=1024, tiktoken_model="gpt-4o"
+    content: str,
+    split_by_character=None,
+    split_by_character_only=False,
+    overlap_token_size=128,
+    max_token_size=1024,
+    tiktoken_model="gpt-4o",
+    **kwargs,
 ):
     tokens = encode_string_by_tiktoken(content, model_name=tiktoken_model)
     results = []
-    for index, start in enumerate(
-        range(0, len(tokens), max_token_size - overlap_token_size)
-    ):
-        chunk_content = decode_tokens_by_tiktoken(
-            tokens[start : start + max_token_size], model_name=tiktoken_model
-        )
-        results.append(
-            {
-                "tokens": min(max_token_size, len(tokens) - start),
-                "content": chunk_content.strip(),
-                "chunk_order_index": index,
-            }
-        )
+    if split_by_character:
+        raw_chunks = content.split(split_by_character)
+        new_chunks = []
+        if split_by_character_only:
+            for chunk in raw_chunks:
+                _tokens = encode_string_by_tiktoken(chunk, model_name=tiktoken_model)
+                new_chunks.append((len(_tokens), chunk))
+        else:
+            for chunk in raw_chunks:
+                _tokens = encode_string_by_tiktoken(chunk, model_name=tiktoken_model)
+                if len(_tokens) > max_token_size:
+                    for start in range(
+                        0, len(_tokens), max_token_size - overlap_token_size
+                    ):
+                        chunk_content = decode_tokens_by_tiktoken(
+                            _tokens[start : start + max_token_size],
+                            model_name=tiktoken_model,
+                        )
+                        new_chunks.append(
+                            (min(max_token_size, len(_tokens) - start), chunk_content)
+                        )
+                else:
+                    new_chunks.append((len(_tokens), chunk))
+        for index, (_len, chunk) in enumerate(new_chunks):
+            results.append(
+                {
+                    "tokens": _len,
+                    "content": chunk.strip(),
+                    "chunk_order_index": index,
+                }
+            )
+    else:
+        for index, start in enumerate(
+            range(0, len(tokens), max_token_size - overlap_token_size)
+        ):
+            chunk_content = decode_tokens_by_tiktoken(
+                tokens[start : start + max_token_size], model_name=tiktoken_model
+            )
+            results.append(
+                {
+                    "tokens": min(max_token_size, len(tokens) - start),
+                    "content": chunk_content.strip(),
+                    "chunk_order_index": index,
+                }
+            )
     return results
 
 
@@ -310,9 +339,13 @@ async def extract_entities(
     entity_vdb: BaseVectorStorage,
     relationships_vdb: BaseVectorStorage,
     global_config: dict,
+    llm_response_cache: BaseKVStorage = None,
 ) -> Union[BaseGraphStorage, None]:
     use_llm_func: callable = global_config["llm_model_func"]
     entity_extract_max_gleaning = global_config["entity_extract_max_gleaning"]
+    enable_llm_cache_for_entity_extract: bool = global_config[
+        "enable_llm_cache_for_entity_extract"
+    ]
 
     ordered_chunks = list(chunks.items())
     # add language and example number params to prompt
@@ -357,6 +390,52 @@ async def extract_entities(
     already_entities = 0
     already_relations = 0
 
+    async def _user_llm_func_with_cache(
+        input_text: str, history_messages: list[dict[str, str]] = None
+    ) -> str:
+        if enable_llm_cache_for_entity_extract and llm_response_cache:
+            need_to_restore = False
+            if (
+                global_config["embedding_cache_config"]
+                and global_config["embedding_cache_config"]["enabled"]
+            ):
+                new_config = global_config.copy()
+                new_config["embedding_cache_config"] = None
+                new_config["enable_llm_cache"] = True
+                llm_response_cache.global_config = new_config
+                need_to_restore = True
+            if history_messages:
+                history = json.dumps(history_messages)
+                _prompt = history + "\n" + input_text
+            else:
+                _prompt = input_text
+
+            arg_hash = compute_args_hash(_prompt)
+            cached_return, _1, _2, _3 = await handle_cache(
+                llm_response_cache, arg_hash, _prompt, "default"
+            )
+            if need_to_restore:
+                llm_response_cache.global_config = global_config
+            if cached_return:
+                return cached_return
+
+            if history_messages:
+                res: str = await use_llm_func(
+                    input_text, history_messages=history_messages
+                )
+            else:
+                res: str = await use_llm_func(input_text)
+            await save_to_cache(
+                llm_response_cache,
+                CacheData(args_hash=arg_hash, content=res, prompt=_prompt),
+            )
+            return res
+
+        if history_messages:
+            return await use_llm_func(input_text, history_messages=history_messages)
+        else:
+            return await use_llm_func(input_text)
+
     async def _process_single_content(chunk_key_dp: tuple[str, TextChunkSchema]):
         nonlocal already_processed, already_entities, already_relations
         chunk_key = chunk_key_dp[0]
@@ -367,17 +446,19 @@ async def extract_entities(
             **context_base, input_text="{input_text}"
         ).format(**context_base, input_text=content)
 
-        final_result = await use_llm_func(hint_prompt)
+        final_result = await _user_llm_func_with_cache(hint_prompt)
         history = pack_user_ass_to_openai_messages(hint_prompt, final_result)
         for now_glean_index in range(entity_extract_max_gleaning):
-            glean_result = await use_llm_func(continue_prompt, history_messages=history)
+            glean_result = await _user_llm_func_with_cache(
+                continue_prompt, history_messages=history
+            )
 
             history += pack_user_ass_to_openai_messages(continue_prompt, glean_result)
             final_result += glean_result
             if now_glean_index == entity_extract_max_gleaning - 1:
                 break
 
-            if_loop_result: str = await use_llm_func(
+            if_loop_result: str = await _user_llm_func_with_cache(
                 if_loop_prompt, history_messages=history
             )
             if_loop_result = if_loop_result.strip().strip('"').strip("'").lower()
@@ -579,15 +660,22 @@ async def kg_query(
         logger.warning("low_level_keywords and high_level_keywords is empty")
         return PROMPTS["fail_response"]
     if ll_keywords == [] and query_param.mode in ["local", "hybrid"]:
-        logger.warning("low_level_keywords is empty")
-        return PROMPTS["fail_response"]
-    else:
-        ll_keywords = ", ".join(ll_keywords)
+        logger.warning(
+            "low_level_keywords is empty, switching from %s mode to global mode",
+            query_param.mode,
+        )
+        query_param.mode = "global"
     if hl_keywords == [] and query_param.mode in ["global", "hybrid"]:
-        logger.warning("high_level_keywords is empty")
-        return PROMPTS["fail_response"]
-    else:
-        hl_keywords = ", ".join(hl_keywords)
+        logger.warning(
+            "high_level_keywords is empty, switching from %s mode to local mode",
+            query_param.mode,
+        )
+        query_param.mode = "local"
+
+    ll_keywords = ", ".join(ll_keywords) if ll_keywords else ""
+    hl_keywords = ", ".join(hl_keywords) if hl_keywords else ""
+
+    logger.info("Using %s mode for query processing", query_param.mode)
 
     # Build context
     keywords = [ll_keywords, hl_keywords]
@@ -653,77 +741,51 @@ async def _build_query_context(
     # ll_entities_context, ll_relations_context, ll_text_units_context = "", "", ""
     # hl_entities_context, hl_relations_context, hl_text_units_context = "", "", ""
 
-    ll_kewwords, hl_keywrds = query[0], query[1]
-    if query_param.mode in ["local", "hybrid"]:
-        if ll_kewwords == "":
-            ll_entities_context, ll_relations_context, ll_text_units_context = (
-                "",
-                "",
-                "",
-            )
-            warnings.warn(
-                "Low Level context is None. Return empty Low entity/relationship/source"
-            )
-            query_param.mode = "global"
-        else:
-            (
-                ll_entities_context,
-                ll_relations_context,
-                ll_text_units_context,
-            ) = await _get_node_data(
-                ll_kewwords,
-                knowledge_graph_inst,
-                entities_vdb,
-                text_chunks_db,
-                query_param,
-            )
-    if query_param.mode in ["global", "hybrid"]:
-        if hl_keywrds == "":
-            hl_entities_context, hl_relations_context, hl_text_units_context = (
-                "",
-                "",
-                "",
-            )
-            warnings.warn(
-                "High Level context is None. Return empty High entity/relationship/source"
-            )
-            query_param.mode = "local"
-        else:
-            (
-                hl_entities_context,
-                hl_relations_context,
-                hl_text_units_context,
-            ) = await _get_edge_data(
-                hl_keywrds,
-                knowledge_graph_inst,
-                relationships_vdb,
-                text_chunks_db,
-                query_param,
-            )
-            if (
-                hl_entities_context == ""
-                and hl_relations_context == ""
-                and hl_text_units_context == ""
-            ):
-                logger.warn("No high level context found. Switching to local mode.")
-                query_param.mode = "local"
-    if query_param.mode == "hybrid":
+    ll_keywords, hl_keywords = query[0], query[1]
+
+    if query_param.mode == "local":
+        entities_context, relations_context, text_units_context = await _get_node_data(
+            ll_keywords,
+            knowledge_graph_inst,
+            entities_vdb,
+            text_chunks_db,
+            query_param,
+        )
+    elif query_param.mode == "global":
+        entities_context, relations_context, text_units_context = await _get_edge_data(
+            hl_keywords,
+            knowledge_graph_inst,
+            relationships_vdb,
+            text_chunks_db,
+            query_param,
+        )
+    else:  # hybrid mode
+        (
+            ll_entities_context,
+            ll_relations_context,
+            ll_text_units_context,
+        ) = await _get_node_data(
+            ll_keywords,
+            knowledge_graph_inst,
+            entities_vdb,
+            text_chunks_db,
+            query_param,
+        )
+        (
+            hl_entities_context,
+            hl_relations_context,
+            hl_text_units_context,
+        ) = await _get_edge_data(
+            hl_keywords,
+            knowledge_graph_inst,
+            relationships_vdb,
+            text_chunks_db,
+            query_param,
+        )
         entities_context, relations_context, text_units_context = combine_contexts(
             [hl_entities_context, ll_entities_context],
             [hl_relations_context, ll_relations_context],
             [hl_text_units_context, ll_text_units_context],
-        )
-    elif query_param.mode == "local":
-        entities_context, relations_context, text_units_context = (
-            ll_entities_context,
-            ll_relations_context,
-            ll_text_units_context,
-        )
-    elif query_param.mode == "global":
-        entities_context, relations_context, text_units_context = (
-            hl_entities_context,
-            hl_relations_context,
-            hl_text_units_context,
         )
     return f"""
 -----Entities-----
