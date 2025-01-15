@@ -33,7 +33,8 @@ class Neo4JStorage(BaseGraphStorage):
         URI = os.environ["NEO4J_URI"]
         USERNAME = os.environ["NEO4J_USERNAME"]
         PASSWORD = os.environ["NEO4J_PASSWORD"]
-        driver = GraphDatabase.driver(URI, auth=(USERNAME, PASSWORD))
+        MAX_CONNECTION_POOL_SIZE = os.environ.get("NEO4J_MAX_CONNECTION_POOL_SIZE", 800)
+        driver = GraphDatabase.driver(URI, auth=(USERNAME, PASSWORD), max_connection_pool_size=MAX_CONNECTION_POOL_SIZE)
 
         try:
             with driver.session(database="system") as session:
@@ -66,6 +67,7 @@ class Neo4JStorage(BaseGraphStorage):
         URI = os.environ["NEO4J_URI"]
         USERNAME = os.environ["NEO4J_USERNAME"]
         PASSWORD = os.environ["NEO4J_PASSWORD"]
+        # MAX_CONNECTION_POOL_SIZE = os.environ.get("NEO4J_MAX_CONNECTION_POOL_SIZE", 800)
         self._driver: AsyncDriver = AsyncGraphDatabase.driver(
             URI, auth=(USERNAME, PASSWORD)
         )

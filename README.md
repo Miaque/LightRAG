@@ -26,6 +26,7 @@ This repository hosts the code of LightRAG. The structure of this code is based 
 </div>
 
 ## 🎉 News
+- [x] [2025.01.13]🎯📢Our team has launched [MiniRAG](https://github.com/HKUDS/MiniRAG) for small models.
 - [x] [2025.01.06]🎯📢You can now [use PostgreSQL for Storage](#using-postgresql-for-storage).
 - [x] [2024.12.31]🎯📢LightRAG now supports [deletion by document ID](https://github.com/HKUDS/LightRAG?tab=readme-ov-file#delete).
 - [x] [2024.11.25]🎯📢LightRAG now supports seamless integration of [custom knowledge graphs](https://github.com/HKUDS/LightRAG?tab=readme-ov-file#insert-custom-kg), empowering users to enhance the system with their own domain expertise.
@@ -366,6 +367,13 @@ For production level scenarios you will most likely want to leverage an enterpri
   SET search_path = ag_catalog, "$user", public;
   CREATE INDEX idx_entity ON dickens."Entity" USING gin (agtype_access_operator(properties, '"node_id"'));
   ```
+* Known issue of the Apache AGE: The released versions got below issue:
+  > You might find that the properties of the nodes/edges are empty.
+  > It is a known issue of the release version: https://github.com/apache/age/pull/1721
+  >
+  > You can Compile the AGE from source code and fix it.
+
+
 
 ### Insert Custom KG
 
