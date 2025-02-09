@@ -12,6 +12,7 @@ from functools import wraps
 from hashlib import md5
 from typing import Any, Union, List, Optional
 import xml.etree.ElementTree as ET
+import bs4
 
 import numpy as np
 import pytz
@@ -32,14 +33,19 @@ class UnlimitedSemaphore:
 
 ENCODER = None
 
+statistic_data = {"llm_call": 0, "llm_cache": 0, "embed_call": 0}
+
 logger = logging.getLogger("lightrag")
+
+# Set httpx logging level to WARNING
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 def set_logger(log_file: str):
     logger.setLevel(logging.INFO)
 
-    file_handler = logging.FileHandler(log_file)
-    file_handler.setLevel(logging.INFO)
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setLevel(logging.DEBUG)
 
     formatter = logging.Formatter(
         "%(asctime)s.%(msecs)03d %(levelname)s [%(threadName)s] [%(filename)s:%(lineno)d] - %(message)s"
@@ -50,7 +56,7 @@ def set_logger(log_file: str):
         logger.addHandler(file_handler)
 
     timezone = pytz.timezone("Asia/Shanghai")
-    
+
     def time_converter(seconds):
         return datetime.fromtimestamp(seconds, tz=timezone).timetuple()
 
@@ -64,17 +70,17 @@ class EmbeddingFunc:
     embedding_dim: int
     max_token_size: int
     func: callable
-    concurrent_limit: int = 16
-
-    def __post_init__(self):
-        if self.concurrent_limit != 0:
-            self._semaphore = asyncio.Semaphore(self.concurrent_limit)
-        else:
-            self._semaphore = UnlimitedSemaphore()
+    # concurrent_limit: int = 16
 
     async def __call__(self, *args, **kwargs) -> np.ndarray:
-        async with self._semaphore:
-            return await self.func(*args, **kwargs)
+        return await self.func(*args, **kwargs)
+
+
+@dataclass
+class ReasoningResponse:
+    reasoning_content: str
+    response_content: str
+    tag: str
 
 
 def locate_json_string_body_from_string(content: str) -> Union[str, None]:
@@ -114,30 +120,40 @@ def convert_response_to_json(response: str) -> dict:
         raise e from None
 
 
-def compute_args_hash(*args):
-    return md5(str(args).encode()).hexdigest()
+def compute_args_hash(*args, cache_type: str = None) -> str:
+    """Compute a hash for the given arguments.
+    Args:
+        *args: Arguments to hash
+        cache_type: Type of cache (e.g., 'keywords', 'query', 'extract')
+    Returns:
+        str: Hash string
+    """
+    import hashlib
+
+    # Convert all arguments to strings and join them
+    args_str = "".join([str(arg) for arg in args])
+    if cache_type:
+        args_str = f"{cache_type}:{args_str}"
+
+    # Compute MD5 hash
+    return hashlib.md5(args_str.encode()).hexdigest()
 
 
 def compute_mdhash_id(content, prefix: str = ""):
     return prefix + md5(content.encode()).hexdigest()
 
 
-def limit_async_func_call(max_size: int, waitting_time: float = 0.0001):
-    """Add restriction of maximum async calling times for a async func"""
+def limit_async_func_call(max_size: int):
+    """Add restriction of maximum concurrent async calls using asyncio.Semaphore"""
 
     def final_decro(func):
-        """Not using async.Semaphore to aovid use nest-asyncio"""
-        __current_size = 0
+        sem = asyncio.Semaphore(max_size)
 
         @wraps(func)
         async def wait_func(*args, **kwargs):
-            nonlocal __current_size
-            while __current_size >= max_size:
-                await asyncio.sleep(waitting_time)
-            __current_size += 1
-            result = await func(*args, **kwargs)
-            __current_size -= 1
-            return result
+            async with sem:
+                result = await func(*args, **kwargs)
+                return result
 
         return wait_func
 
@@ -228,15 +244,35 @@ def truncate_list_by_token_size(list_data: list, key: callable, max_token_size: 
 
 def list_of_list_to_csv(data: List[List[str]]) -> str:
     output = io.StringIO()
-    writer = csv.writer(output)
+    writer = csv.writer(
+        output,
+        quoting=csv.QUOTE_ALL,  # Quote all fields
+        escapechar="\\",  # Use backslash as escape character
+        quotechar='"',  # Use double quotes
+        lineterminator="\n",  # Explicit line terminator
+    )
     writer.writerows(data)
     return output.getvalue()
 
 
 def csv_string_to_list(csv_string: str) -> List[List[str]]:
-    output = io.StringIO(csv_string)
-    reader = csv.reader(output)
-    return [row for row in reader]
+    # Clean the string by removing NUL characters
+    cleaned_string = csv_string.replace("\0", "")
+
+    output = io.StringIO(cleaned_string)
+    reader = csv.reader(
+        output,
+        quoting=csv.QUOTE_ALL,  # Match the writer configuration
+        escapechar="\\",  # Use backslash as escape character
+        quotechar='"',  # Use double quotes
+    )
+
+    try:
+        return [row for row in reader]
+    except csv.Error as e:
+        raise ValueError(f"Failed to parse CSV string: {str(e)}")
+    finally:
+        output.close()
 
 
 def save_data_to_file(data, file_name):
@@ -349,8 +385,11 @@ async def get_best_cached_response(
     use_llm_check=False,
     llm_func=None,
     original_prompt=None,
+    cache_type=None,
 ) -> Union[str, None]:
-    # Get mode-specific cache
+    logger.debug(
+        f"get_best_cached_response:  mode={mode} cache_type={cache_type} use_llm_check={use_llm_check}"
+    )
     mode_cache = await hashing_kv.get_by_id(mode)
     if not mode_cache:
         return None
@@ -362,6 +401,10 @@ async def get_best_cached_response(
 
     # Only iterate through cache entries for this mode
     for cache_id, cache_data in mode_cache.items():
+        # Skip if cache_type doesn't match
+        if cache_type and cache_data.get("cache_type") != cache_type:
+            continue
+
         if cache_data["embedding"] is None:
             continue
 
@@ -437,8 +480,12 @@ def cosine_similarity(v1, v2):
     return dot_product / (norm1 * norm2)
 
 
-def quantize_embedding(embedding: np.ndarray, bits=8) -> tuple:
+def quantize_embedding(embedding: Union[np.ndarray, list], bits=8) -> tuple:
     """Quantize embedding to specified bits"""
+    # Convert list to numpy array if needed
+    if isinstance(embedding, list):
+        embedding = np.array(embedding)
+
     # Calculate min/max values for reconstruction
     min_val = embedding.min()
     max_val = embedding.max()
@@ -458,58 +505,60 @@ def dequantize_embedding(
     return (quantized * scale + min_val).astype(np.float32)
 
 
-async def handle_cache(hashing_kv, args_hash, prompt, mode="default"):
+async def handle_cache(
+    hashing_kv,
+    args_hash,
+    prompt,
+    mode="default",
+    cache_type=None,
+    force_llm_cache=False,
+):
     """Generic cache handling function"""
-    if hashing_kv is None or not hashing_kv.global_config.get("enable_llm_cache"):
+    if hashing_kv is None or not (
+        force_llm_cache or hashing_kv.global_config.get("enable_llm_cache")
+    ):
         return None, None, None, None
 
-    # For naive mode, only use simple cache matching
-    if mode == "naive":
-        if exists_func(hashing_kv, "get_by_mode_and_id"):
-            mode_cache = await hashing_kv.get_by_mode_and_id(mode, args_hash) or {}
-        else:
-            mode_cache = await hashing_kv.get_by_id(mode) or {}
-        if args_hash in mode_cache:
-            return mode_cache[args_hash]["return"], None, None, None
-        return None, None, None, None
-
-    # Get embedding cache configuration
-    embedding_cache_config = hashing_kv.global_config.get(
-        "embedding_cache_config",
-        {"enabled": False, "similarity_threshold": 0.95, "use_llm_check": False},
-    )
-    is_embedding_cache_enabled = embedding_cache_config["enabled"]
-    use_llm_check = embedding_cache_config.get("use_llm_check", False)
-
-    quantized = min_val = max_val = None
-    if is_embedding_cache_enabled:
-        # Use embedding cache
-        embedding_model_func = hashing_kv.global_config["embedding_func"]["func"]
-        llm_model_func = hashing_kv.global_config.get("llm_model_func")
-
-        current_embedding = await embedding_model_func([prompt])
-        quantized, min_val, max_val = quantize_embedding(current_embedding[0])
-        best_cached_response = await get_best_cached_response(
-            hashing_kv,
-            current_embedding[0],
-            similarity_threshold=embedding_cache_config["similarity_threshold"],
-            mode=mode,
-            use_llm_check=use_llm_check,
-            llm_func=llm_model_func if use_llm_check else None,
-            original_prompt=prompt if use_llm_check else None,
+    if mode != "default":
+        # Get embedding cache configuration
+        embedding_cache_config = hashing_kv.global_config.get(
+            "embedding_cache_config",
+            {"enabled": False, "similarity_threshold": 0.95, "use_llm_check": False},
         )
-        if best_cached_response is not None:
-            return best_cached_response, None, None, None
-    else:
-        # Use regular cache
-        if exists_func(hashing_kv, "get_by_mode_and_id"):
-            mode_cache = await hashing_kv.get_by_mode_and_id(mode, args_hash) or {}
-        else:
-            mode_cache = await hashing_kv.get_by_id(mode) or {}
-        if args_hash in mode_cache:
-            return mode_cache[args_hash]["return"], None, None, None
+        is_embedding_cache_enabled = embedding_cache_config["enabled"]
+        use_llm_check = embedding_cache_config.get("use_llm_check", False)
 
-    return None, quantized, min_val, max_val
+        quantized = min_val = max_val = None
+        if is_embedding_cache_enabled:
+            # Use embedding cache
+            current_embedding = await hashing_kv.embedding_func([prompt])
+            llm_model_func = hashing_kv.global_config.get("llm_model_func")
+            quantized, min_val, max_val = quantize_embedding(current_embedding[0])
+            best_cached_response = await get_best_cached_response(
+                hashing_kv,
+                current_embedding[0],
+                similarity_threshold=embedding_cache_config["similarity_threshold"],
+                mode=mode,
+                use_llm_check=use_llm_check,
+                llm_func=llm_model_func if use_llm_check else None,
+                original_prompt=prompt,
+                cache_type=cache_type,
+            )
+            if best_cached_response is not None:
+                return best_cached_response, None, None, None
+            else:
+                return None, quantized, min_val, max_val
+
+    # For default mode(extract_entities or naive query) or is_embedding_cache_enabled is False
+    # Use regular cache
+    if exists_func(hashing_kv, "get_by_mode_and_id"):
+        mode_cache = await hashing_kv.get_by_mode_and_id(mode, args_hash) or {}
+    else:
+        mode_cache = await hashing_kv.get_by_id(mode) or {}
+    if args_hash in mode_cache:
+        return mode_cache[args_hash]["return"], None, None, None
+
+    return None, None, None, None
 
 
 @dataclass
@@ -521,6 +570,7 @@ class CacheData:
     min_val: Optional[float] = None
     max_val: Optional[float] = None
     mode: str = "default"
+    cache_type: str = "query"
 
 
 async def save_to_cache(hashing_kv, cache_data: CacheData):
@@ -537,6 +587,7 @@ async def save_to_cache(hashing_kv, cache_data: CacheData):
 
     mode_cache[cache_data.args_hash] = {
         "return": cache_data.content,
+        "cache_type": cache_data.cache_type,
         "embedding": cache_data.quantized.tobytes().hex()
         if cache_data.quantized is not None
         else None,
@@ -578,3 +629,84 @@ def exists_func(obj, func_name: str) -> bool:
         return True
     else:
         return False
+
+
+def get_conversation_turns(conversation_history: list[dict], num_turns: int) -> str:
+    """
+    Process conversation history to get the specified number of complete turns.
+
+    Args:
+        conversation_history: List of conversation messages in chronological order
+        num_turns: Number of complete turns to include
+
+    Returns:
+        Formatted string of the conversation history
+    """
+    # Group messages into turns
+    turns = []
+    messages = []
+
+    # First, filter out keyword extraction messages
+    for msg in conversation_history:
+        if msg["role"] == "assistant" and (
+            msg["content"].startswith('{ "high_level_keywords"')
+            or msg["content"].startswith("{'high_level_keywords'")
+        ):
+            continue
+        messages.append(msg)
+
+    # Then process messages in chronological order
+    i = 0
+    while i < len(messages) - 1:
+        msg1 = messages[i]
+        msg2 = messages[i + 1]
+
+        # Check if we have a user-assistant or assistant-user pair
+        if (msg1["role"] == "user" and msg2["role"] == "assistant") or (
+            msg1["role"] == "assistant" and msg2["role"] == "user"
+        ):
+            # Always put user message first in the turn
+            if msg1["role"] == "assistant":
+                turn = [msg2, msg1]  # user, assistant
+            else:
+                turn = [msg1, msg2]  # user, assistant
+            turns.append(turn)
+        i += 2
+
+    # Keep only the most recent num_turns
+    if len(turns) > num_turns:
+        turns = turns[-num_turns:]
+
+    # Format the turns into a string
+    formatted_turns = []
+    for turn in turns:
+        formatted_turns.extend(
+            [f"user: {turn[0]['content']}", f"assistant: {turn[1]['content']}"]
+        )
+
+    return "\n".join(formatted_turns)
+
+
+def extract_reasoning(response: str, tag: str) -> ReasoningResponse:
+    """Extract the reasoning section and the following section from the LLM response.
+
+    Args:
+        response: LLM response
+        tag: Tag to extract
+    Returns:
+        ReasoningResponse: Reasoning section and following section
+
+    """
+    soup = bs4.BeautifulSoup(response, "html.parser")
+
+    reasoning_section = soup.find(tag)
+    if reasoning_section is None:
+        return ReasoningResponse(None, response, tag)
+    reasoning_content = reasoning_section.get_text().strip()
+
+    after_reasoning_section = reasoning_section.next_sibling
+    if after_reasoning_section is None:
+        return ReasoningResponse(reasoning_content, "", tag)
+    after_reasoning_content = after_reasoning_section.get_text().strip()
+
+    return ReasoningResponse(reasoning_content, after_reasoning_content, tag)

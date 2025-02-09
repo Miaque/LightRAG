@@ -6,6 +6,12 @@ import time
 from dataclasses import dataclass
 from typing import Union, List, Dict, Set, Any, Tuple
 import numpy as np
+
+import pipmaster as pm
+
+if not pm.is_installed("asyncpg"):
+    pm.install("asyncpg")
+
 import asyncpg
 import sys
 from tqdm.asyncio import tqdm as tqdm_async
@@ -24,7 +30,9 @@ from ..base import (
     DocStatus,
     DocProcessingStatus,
     BaseGraphStorage,
+    T,
 )
+from ..namespace import NameSpace, is_namespace
 
 if sys.platform.startswith("win"):
     import asyncio.windows_events
@@ -180,7 +188,7 @@ class PGKVStorage(BaseKVStorage):
         """Get doc_full data by id."""
         sql = SQL_TEMPLATES["get_by_id_" + self.namespace]
         params = {"workspace": self.db.workspace, "id": id}
-        if "llm_response_cache" == self.namespace:
+        if is_namespace(self.namespace, NameSpace.KV_STORE_LLM_RESPONSE_CACHE):
             array_res = await self.db.query(sql, params, multirows=True)
             res = {}
             for row in array_res:
@@ -196,7 +204,7 @@ class PGKVStorage(BaseKVStorage):
         """Specifically for llm_response_cache."""
         sql = SQL_TEMPLATES["get_by_mode_id_" + self.namespace]
         params = {"workspace": self.db.workspace, mode: mode, "id": id}
-        if "llm_response_cache" == self.namespace:
+        if is_namespace(self.namespace, NameSpace.KV_STORE_LLM_RESPONSE_CACHE):
             array_res = await self.db.query(sql, params, multirows=True)
             res = {}
             for row in array_res:
@@ -212,7 +220,7 @@ class PGKVStorage(BaseKVStorage):
             ids=",".join([f"'{id}'" for id in ids])
         )
         params = {"workspace": self.db.workspace}
-        if "llm_response_cache" == self.namespace:
+        if is_namespace(self.namespace, NameSpace.KV_STORE_LLM_RESPONSE_CACHE):
             array_res = await self.db.query(sql, params, multirows=True)
             modes = set()
             dict_res: dict[str, dict] = {}
@@ -231,10 +239,20 @@ class PGKVStorage(BaseKVStorage):
         else:
             return None
 
+    async def all_keys(self) -> list[dict]:
+        if is_namespace(self.namespace, NameSpace.KV_STORE_LLM_RESPONSE_CACHE):
+            sql = "select workspace,mode,id from lightrag_llm_cache"
+            res = await self.db.query(sql, multirows=True)
+            return res
+        else:
+            logger.error(
+                f"all_keys is only implemented for llm_response_cache, not for {self.namespace}"
+            )
+
     async def filter_keys(self, keys: List[str]) -> Set[str]:
         """Filter out duplicated content"""
         sql = SQL_TEMPLATES["filter_keys"].format(
-            table_name=NAMESPACE_TABLE_MAP[self.namespace],
+            table_name=namespace_to_table_name(self.namespace),
             ids=",".join([f"'{id}'" for id in keys]),
         )
         params = {"workspace": self.db.workspace}
@@ -253,9 +271,9 @@ class PGKVStorage(BaseKVStorage):
 
     ################ INSERT METHODS ################
     async def upsert(self, data: Dict[str, dict]):
-        if self.namespace == "text_chunks":
+        if is_namespace(self.namespace, NameSpace.KV_STORE_TEXT_CHUNKS):
             pass
-        elif self.namespace == "full_docs":
+        elif is_namespace(self.namespace, NameSpace.KV_STORE_FULL_DOCS):
             for k, v in data.items():
                 upsert_sql = SQL_TEMPLATES["upsert_doc_full"]
                 _data = {
@@ -264,7 +282,7 @@ class PGKVStorage(BaseKVStorage):
                     "workspace": self.db.workspace,
                 }
                 await self.db.execute(upsert_sql, _data)
-        elif self.namespace == "llm_response_cache":
+        elif is_namespace(self.namespace, NameSpace.KV_STORE_LLM_RESPONSE_CACHE):
             for mode, items in data.items():
                 for k, v in items.items():
                     upsert_sql = SQL_TEMPLATES["upsert_llm_response_cache"]
@@ -279,18 +297,23 @@ class PGKVStorage(BaseKVStorage):
                     await self.db.execute(upsert_sql, _data)
 
     async def index_done_callback(self):
-        if self.namespace in ["full_docs", "text_chunks"]:
+        if is_namespace(
+            self.namespace,
+            (NameSpace.KV_STORE_FULL_DOCS, NameSpace.KV_STORE_TEXT_CHUNKS),
+        ):
             logger.info("full doc and chunk data had been saved into postgresql db!")
 
 
 @dataclass
 class PGVectorStorage(BaseVectorStorage):
-    cosine_better_than_threshold: float = 0.2
+    cosine_better_than_threshold: float = float(os.getenv("COSINE_THRESHOLD", "0.2"))
     db: PostgreSQLDB = None
 
     def __post_init__(self):
         self._max_batch_size = self.global_config["embedding_batch_num"]
-        self.cosine_better_than_threshold = self.global_config.get(
+        # Use global config value if specified, otherwise use default
+        config = self.global_config.get("vector_db_storage_cls_kwargs", {})
+        self.cosine_better_than_threshold = config.get(
             "cosine_better_than_threshold", self.cosine_better_than_threshold
         )
 
@@ -370,11 +393,11 @@ class PGVectorStorage(BaseVectorStorage):
         for i, d in enumerate(list_data):
             d["__vector__"] = embeddings[i]
         for item in list_data:
-            if self.namespace == "chunks":
+            if is_namespace(self.namespace, NameSpace.VECTOR_STORE_CHUNKS):
                 upsert_sql, data = self._upsert_chunks(item)
-            elif self.namespace == "entities":
+            elif is_namespace(self.namespace, NameSpace.VECTOR_STORE_ENTITIES):
                 upsert_sql, data = self._upsert_entities(item)
-            elif self.namespace == "relationships":
+            elif is_namespace(self.namespace, NameSpace.VECTOR_STORE_RELATIONSHIPS):
                 upsert_sql, data = self._upsert_relationships(item)
             else:
                 raise ValueError(f"{self.namespace} is not supported")
@@ -412,8 +435,7 @@ class PGDocStatusStorage(DocStatusStorage):
 
     async def filter_keys(self, data: list[str]) -> set[str]:
         """Return keys that don't exist in storage"""
-        ids = ",".join([repr(_id) for _id in data])
-        sql = f"SELECT id FROM LIGHTRAG_DOC_STATUS WHERE workspace=$1 AND id IN ({ids})"
+        sql = f"SELECT id FROM LIGHTRAG_DOC_STATUS WHERE workspace=$1 AND id IN ({",".join([f"'{_id}'" for _id in data])})"
         result = await self.db.query(sql, {"workspace": self.db.workspace}, True)
         # The result is like [{'id': 'id1'}, {'id': 'id2'}, ...].
         if result is None:
@@ -421,6 +443,22 @@ class PGDocStatusStorage(DocStatusStorage):
         else:
             existed = set([element["id"] for element in result])
             return set(data) - existed
+
+    async def get_by_id(self, id: str) -> Union[T, None]:
+        sql = "select * from LIGHTRAG_DOC_STATUS where workspace=$1 and id=$2"
+        params = {"workspace": self.db.workspace, "id": id}
+        result = await self.db.query(sql, params, True)
+        if result is None or result == []:
+            return None
+        else:
+            return DocProcessingStatus(
+                content_length=result[0]["content_length"],
+                content_summary=result[0]["content_summary"],
+                status=result[0]["status"],
+                chunks_count=result[0]["chunks_count"],
+                created_at=result[0]["created_at"],
+                updated_at=result[0]["updated_at"],
+            )
 
     async def get_status_counts(self) -> Dict[str, int]:
         """Get counts of documents in each status"""
@@ -864,9 +902,9 @@ class PGGraphStorage(BaseGraphStorage):
 
         query = """SELECT * FROM cypher('%s', $$
                       MATCH (n:Entity {node_id: "%s"})
-                      OPTIONAL MATCH (n)-[r]-(connected)
-                      RETURN n, r, connected
-                    $$) AS (n agtype, r agtype, connected agtype)""" % (
+                      OPTIONAL MATCH (n)-[]-(connected)
+                      RETURN n, connected
+                    $$) AS (n agtype, connected agtype)""" % (
             self.graph_name,
             label,
         )
@@ -986,14 +1024,20 @@ class PGGraphStorage(BaseGraphStorage):
 
 
 NAMESPACE_TABLE_MAP = {
-    "full_docs": "LIGHTRAG_DOC_FULL",
-    "text_chunks": "LIGHTRAG_DOC_CHUNKS",
-    "chunks": "LIGHTRAG_DOC_CHUNKS",
-    "entities": "LIGHTRAG_VDB_ENTITY",
-    "relationships": "LIGHTRAG_VDB_RELATION",
-    "doc_status": "LIGHTRAG_DOC_STATUS",
-    "llm_response_cache": "LIGHTRAG_LLM_CACHE",
+    NameSpace.KV_STORE_FULL_DOCS: "LIGHTRAG_DOC_FULL",
+    NameSpace.KV_STORE_TEXT_CHUNKS: "LIGHTRAG_DOC_CHUNKS",
+    NameSpace.VECTOR_STORE_CHUNKS: "LIGHTRAG_DOC_CHUNKS",
+    NameSpace.VECTOR_STORE_ENTITIES: "LIGHTRAG_VDB_ENTITY",
+    NameSpace.VECTOR_STORE_RELATIONSHIPS: "LIGHTRAG_VDB_RELATION",
+    NameSpace.DOC_STATUS: "LIGHTRAG_DOC_STATUS",
+    NameSpace.KV_STORE_LLM_RESPONSE_CACHE: "LIGHTRAG_LLM_CACHE",
 }
+
+
+def namespace_to_table_name(namespace: str) -> str:
+    for k, v in NAMESPACE_TABLE_MAP.items():
+        if is_namespace(namespace, k):
+            return v
 
 
 TABLES = {

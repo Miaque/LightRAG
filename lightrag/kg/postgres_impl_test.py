@@ -1,11 +1,20 @@
 import asyncio
-import asyncpg
 import sys
 import os
+import pipmaster as pm
 
+if not pm.is_installed("psycopg-pool"):
+    pm.install("psycopg-pool")
+    pm.install("psycopg[binary,pool]")
+if not pm.is_installed("asyncpg"):
+    pm.install("asyncpg")
+
+import asyncpg
 import psycopg
 from psycopg_pool import AsyncConnectionPool
-from lightrag.kg.postgres_impl import PostgreSQLDB, PGGraphStorage
+
+from ..kg.postgres_impl import PostgreSQLDB, PGGraphStorage
+from ..namespace import NameSpace
 
 DB = "rag"
 USER = "rag"
@@ -69,7 +78,7 @@ db = PostgreSQLDB(
 async def query_with_age():
     await db.initdb()
     graph = PGGraphStorage(
-        namespace="chunk_entity_relation",
+        namespace=NameSpace.GRAPH_STORE_CHUNK_ENTITY_RELATION,
         global_config={},
         embedding_func=None,
     )
@@ -85,7 +94,7 @@ async def query_with_age():
 async def create_edge_with_age():
     await db.initdb()
     graph = PGGraphStorage(
-        namespace="chunk_entity_relation",
+        namespace=NameSpace.GRAPH_STORE_CHUNK_ENTITY_RELATION,
         global_config={},
         embedding_func=None,
     )
